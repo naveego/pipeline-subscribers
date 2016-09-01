@@ -95,7 +95,7 @@ func schemaExists(ctx subscriber.Context, db *sql.DB) (bool, error) {
 
 func getShapesFromDb(ctx subscriber.Context, db *sql.DB) (map[string]pipeline.Shape, error) {
 
-	ctx.Log.Infof("Getting existing shapes from database")
+	ctx.Logger.Infof("Getting existing shapes from database")
 
 	rows, err := db.Query(`select c.name as col_name, ty.name as type_name
 	from sys.tables t
@@ -130,7 +130,7 @@ func getShapesFromDb(ctx subscriber.Context, db *sql.DB) (map[string]pipeline.Sh
 	}
 
 	if len(properties) > 0 {
-		ctx.Log.Debugf("Found Shape: Name=wellheader, Properties=%s", strings.Join(properties, ","))
+		ctx.Logger.Debugf("Found Shape: Name=wellheader, Properties=%s", strings.Join(properties, ","))
 
 		shape, err := pipeline.NewShapeFromProperties(properties)
 		if err != nil {
