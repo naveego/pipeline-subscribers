@@ -12,6 +12,10 @@ import (
 
 type Subscriber struct{}
 
+func NewSubscriber() subscriber.Subscriber {
+	return &Subscriber{}
+}
+
 func (s *Subscriber) Receive(ctx subscriber.Context, dataPoint pipeline.DataPoint) {
 	ctx.Logger.Info("Receiving data point")
 }

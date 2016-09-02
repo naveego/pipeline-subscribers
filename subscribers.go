@@ -7,6 +7,6 @@ import (
 )
 
 func init() {
-	subscriber.RegisterFactory("mssql", func() subscriber.Subscriber { return mssql.Subscriber{} })
-	subscriber.RegisterFactory("wellcast", func() subscriber.Subscriber { return wellcast.Subscriber{} })
+	subscriber.RegisterFactory("mssql", mssql.NewSubscriber)
+	subscriber.RegisterFactory("wellcast", wellcast.NewSubscriber)
 }
