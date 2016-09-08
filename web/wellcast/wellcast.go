@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
-	"github.com/naveego/pipeline-api/subscriber"
 )
 
 type Subscriber struct{}

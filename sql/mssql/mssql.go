@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	_ "github.com/denisenkom/go-mssqldb"
+	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
-	"github.com/naveego/pipeline-api/subscriber"
 )
 
 type Subscriber struct {
@@ -18,7 +19,7 @@ func NewSubscriber() subscriber.Subscriber {
 	return &Subscriber{}
 }
 
-func (s *Subscriber) Init(ctx subscriber.Context) {
+func (s *Subscriber) Init(ctx subscriber.Context) error {
 
 	ctx.Logger.Info("Initializing Subscriber")
 
@@ -30,21 +31,25 @@ func (s *Subscriber) Init(ctx subscriber.Context) {
 	db, err := sql.Open("mssql", connectionString)
 	if err != nil {
 		ctx.Logger.Fatalf("Could not connect to SQL Database: %v", err)
+		return err
 	}
 
-	shapes, err := getShapesFromDb(ctx, "", db)
+	shapes, err := getShapesFromDb(ctx, db)
 	if err != nil {
 		ctx.Logger.Fatalf("Could not initialize the SQL connection: %v", err)
+		return err
 	}
 
 	err = ensureSchema(ctx, db)
 	if err != nil {
 		ctx.Logger.Fatalf("Could not ensure schema: %v", err)
+		return err
 	}
 
 	s.db = db
 	s.currentShapes = shapes
 
+	return nil
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, dataPoint pipeline.DataPoint) {
@@ -97,7 +102,7 @@ func schemaExists(ctx subscriber.Context, db *sql.DB) (bool, error) {
 	return count > 0, nil
 }
 
-func getShapesFromDb(ctx subscriber.Context, entity string, db *sql.DB) (map[string]pipeline.Shape, error) {
+func getShapesFromDb(ctx subscriber.Context, db *sql.DB) (map[string]pipeline.Shape, error) {
 
 	ctx.Logger.Infof("Getting existing shapes from database")
 
@@ -132,15 +137,15 @@ func getShapesFromDb(ctx subscriber.Context, entity string, db *sql.DB) (map[str
 		shapeStr := fmt.Sprintf("%s:%s", colName, typeName)
 		properties = append(properties, shapeStr)
 
-		if tableName != currentShapeName {
-			ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", entity, strings.Join(properties, ","))
+		if currentShapeName != "" && tableName != currentShapeName {
+			ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", tableName, strings.Join(properties, ","))
 
 			shape, err := pipeline.NewShapeFromProperties(properties)
 			if err != nil {
 				return shapes, err
 			}
 
-			shapes[entity] = shape
+			shapes[tableName] = shape
 			properties = []string{}
 		}
 
@@ -148,13 +153,13 @@ func getShapesFromDb(ctx subscriber.Context, entity string, db *sql.DB) (map[str
 	}
 
 	if len(properties) > 0 {
-		ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", entity, strings.Join(properties, ","))
+		ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", currentShapeName, strings.Join(properties, ","))
 
 		shape, err := pipeline.NewShapeFromProperties(properties)
 		if err != nil {
 			return shapes, err
 		}
-		shapes[entity] = shape
+		shapes[currentShapeName] = shape
 	}
 	return shapes, nil
 }

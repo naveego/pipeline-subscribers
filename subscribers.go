@@ -1,7 +1,7 @@
 package subscribers
 
 import (
-	"github.com/naveego/pipeline-api/subscriber"
+	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/pipeline-subscribers/sql/mssql"
 	"github.com/naveego/pipeline-subscribers/web/wellcast"
 )
