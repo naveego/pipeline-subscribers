@@ -11,8 +11,8 @@ import (
 )
 
 type Subscriber struct {
-	db            *sql.DB                   // The connection to the database
-	currentShapes map[string]pipeline.Shape // The current shapes
+	db             *sql.DB  // The connection to the database
+	ensuredSchemas []string // An array of schema names that have already been ensured by this subscriber
 }
 
 func NewSubscriber() subscriber.Subscriber {
@@ -34,59 +34,68 @@ func (s *Subscriber) Init(ctx subscriber.Context) error {
 		return err
 	}
 
-	shapes, err := getShapesFromDb(ctx, db)
-	if err != nil {
-		ctx.Logger.Fatalf("Could not initialize the SQL connection: %v", err)
-		return err
-	}
-
-	err = ensureSchema(ctx, db)
-	if err != nil {
-		ctx.Logger.Fatalf("Could not ensure schema: %v", err)
-		return err
-	}
-
 	s.db = db
-	s.currentShapes = shapes
 
 	return nil
 }
 
-func (s *Subscriber) Receive(ctx subscriber.Context, dataPoint pipeline.DataPoint) {
+func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeInfo, dataPoint pipeline.DataPoint) {
 
-	_, exists := s.currentShapes[dataPoint.Entity]
-	if !exists {
-		err := createShape(ctx, s.db, dataPoint.Entity, dataPoint.Shape)
-		if err != nil {
-			ctx.Logger.Error("Could not create shape storage", err)
+	schemaName := getSchemaName(dataPoint)
+	if !contains(s.ensuredSchemas, schemaName) {
+		if err := ensureSchema(ctx, s.db, schemaName); err != nil {
+			ctx.Logger.Errorf("Could not ensure schema '%s': %v", schemaName, err)
+			return
 		}
-		s.currentShapes[dataPoint.Entity] = dataPoint.Shape
+		s.ensuredSchemas = append(s.ensuredSchemas, schemaName)
 	}
 
-	err := upsertData(ctx, s.db, dataPoint.Entity, dataPoint)
-	if err != nil {
-		ctx.Logger.Errorf("Could not save data to database: %v", err)
+	if shapeInfo.IsNew {
+		err := createShape(ctx, s.db, schemaName, dataPoint.Entity, shapeInfo.Shape)
+		if err != nil {
+			ctx.Logger.Errorf("Could not create shape for '%s': %v", dataPoint.Entity, err)
+			return
+		}
+	} else if shapeInfo.HasNewProperties {
+
+		for prop, pType := range shapeInfo.NewProperties {
+			err := addProperty(ctx, s.db, schemaName, dataPoint.Entity, prop, pType)
+			if err != nil {
+				ctx.Logger.Errorf("Could not add property '%s' to entity '%s': %v", prop, dataPoint.Entity, err)
+				return
+			}
+		}
 	}
 
+	if err := upsertData(ctx, s.db, schemaName, dataPoint.Entity, dataPoint); err != nil {
+		ctx.Logger.Errorf("Could not upsert data point to entity '%s': %v", dataPoint.Entity, err)
+	}
 }
 
-func ensureSchema(ctx subscriber.Context, db *sql.DB) error {
+func getSchemaName(dataPoint pipeline.DataPoint) string {
+	if dataPoint.Source == "" {
+		return "dbo"
+	}
+	return strings.ToLower(dataPoint.Source)
+}
 
-	exists, err := schemaExists(ctx, db)
+func ensureSchema(ctx subscriber.Context, db *sql.DB, schemaName string) error {
+
+	exists, err := schemaExists(ctx, db, schemaName)
 	if err != nil {
 		return err
 	}
 
 	if !exists {
-		ctx.Logger.Infof("Creating Schema %s", ctx.Subscriber.SafeName)
-		_, err = db.Exec(fmt.Sprintf("create schema [%s]", ctx.Subscriber.SafeName))
+		ctx.Logger.Infof("Creating Schema %s", schemaName)
+		_, err = db.Exec(fmt.Sprintf("create schema [%s]", schemaName))
 	}
 
 	return err
 }
 
-func schemaExists(ctx subscriber.Context, db *sql.DB) (bool, error) {
-	stmt, err := db.Prepare(fmt.Sprintf("select count(*) from sys.schemas where name='%s'", ctx.Subscriber.SafeName))
+func schemaExists(ctx subscriber.Context, db *sql.DB, schemaName string) (bool, error) {
+	stmt, err := db.Prepare(fmt.Sprintf("select count(*) from sys.schemas where name='%s'", schemaName))
 	if err != nil {
 		return false, err
 	}
@@ -102,70 +111,8 @@ func schemaExists(ctx subscriber.Context, db *sql.DB) (bool, error) {
 	return count > 0, nil
 }
 
-func getShapesFromDb(ctx subscriber.Context, db *sql.DB) (map[string]pipeline.Shape, error) {
-
-	ctx.Logger.Infof("Getting existing shapes from database")
-
-	rows, err := db.Query(`select t.name as table_Name, c.name as col_name, ty.name as type_name
-	from sys.tables t
-	inner join sys.columns c on (t.object_id = c.object_id)
-	inner join sys.schemas s on (t.schema_id = s.schema_id)
-	inner join sys.types ty on (c.user_type_id = ty.user_type_id)
-	where
-	s.name = ?1
-	order by t.name, c.name
-	`, ctx.Subscriber.SafeName)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	shapes := make(map[string]pipeline.Shape)
-	currentShapeName := ""
-	properties := []string{}
-
-	for rows.Next() {
-		var colName string
-		var typeName string
-		var tableName string
-
-		err = rows.Scan(&tableName, &colName, &typeName)
-		if err != nil {
-			return nil, err
-		}
-
-		shapeStr := fmt.Sprintf("%s:%s", colName, typeName)
-		properties = append(properties, shapeStr)
-
-		if currentShapeName != "" && tableName != currentShapeName {
-			ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", tableName, strings.Join(properties, ","))
-
-			shape, err := pipeline.NewShapeFromProperties(properties)
-			if err != nil {
-				return shapes, err
-			}
-
-			shapes[tableName] = shape
-			properties = []string{}
-		}
-
-		currentShapeName = tableName
-	}
-
-	if len(properties) > 0 {
-		ctx.Logger.Debugf("Found Shape: Name=%s, Properties=%s", currentShapeName, strings.Join(properties, ","))
-
-		shape, err := pipeline.NewShapeFromProperties(properties)
-		if err != nil {
-			return shapes, err
-		}
-		shapes[currentShapeName] = shape
-	}
-	return shapes, nil
-}
-
-func createShape(ctx subscriber.Context, db *sql.DB, entity string, shape pipeline.Shape) error {
-	createStmt := fmt.Sprintf("create table [%s].[%s] ( \n", ctx.Subscriber.SafeName, entity)
+func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, shape pipeline.Shape) error {
+	createStmt := fmt.Sprintf("create table [%s].[%s] ( \n", schemaName, entity)
 
 	for _, propAndType := range shape.Properties {
 
@@ -194,9 +141,29 @@ func createShape(ctx subscriber.Context, db *sql.DB, entity string, shape pipeli
 
 }
 
-func upsertData(ctx subscriber.Context, db *sql.DB, entity string, dataPoint pipeline.DataPoint) error {
+func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, property, propType string) error {
+
+	propSQLType := "nvarchar(512)"
+
+	switch propType {
+	case "number":
+		propSQLType = "decimal(18,4)"
+	case "date":
+		propSQLType = "smalldatetime"
+	case "bool":
+		propSQLType = "bit"
+	}
+
+	altrStmt := fmt.Sprintf("alter table [%s].[%s] add column [%s] %s NULL", schemaName, entity, property, propSQLType)
+
+	_, err := db.Exec(altrStmt)
+	return err
+
+}
+
+func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, dataPoint pipeline.DataPoint) error {
 	var columnStr, valueStr string
-	upsertStmt := fmt.Sprintf("insert into [%s].[%s]\n", ctx.Subscriber.SafeName, entity)
+	upsertStmt := fmt.Sprintf("insert into [%s].[%s]\n", schemaName, entity)
 
 	for _, propAndType := range dataPoint.Shape.Properties {
 		sepIdx := strings.Index(propAndType, ":")
@@ -251,4 +218,13 @@ func getStringSetting(settings map[string]interface{}, name string) (string, boo
 
 	return val, true
 
+}
+
+func contains(a []string, value string) bool {
+	for _, v := range a {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }

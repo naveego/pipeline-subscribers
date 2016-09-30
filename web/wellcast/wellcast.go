@@ -16,7 +16,7 @@ func NewSubscriber() subscriber.Subscriber {
 	return &Subscriber{}
 }
 
-func (s *Subscriber) Receive(ctx subscriber.Context, dataPoint pipeline.DataPoint) {
+func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeInfo, dataPoint pipeline.DataPoint) {
 	ctx.Logger.Info("Receiving data point")
 }
 
