@@ -65,6 +65,7 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeI
 		}
 	}
 
+	ctx.Logger.Debug("Upserting Data")
 	if err := upsertData(ctx, s.db, schemaName, dataPoint.Entity, dataPoint); err != nil {
 		ctx.Logger.Errorf("Could not upsert data point to entity '%s': %v", dataPoint.Entity, err)
 	}
@@ -122,17 +123,27 @@ func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, 
 
 		switch propType {
 		case "number":
-			createStmt = createStmt + " decimal(18,4) null,\n "
+			createStmt += " decimal(18,4)"
 		case "date":
-			createStmt = createStmt + " smalldatetime null, \n "
+			createStmt += " smalldatetime"
 		case "bool":
-			createStmt = createStmt + " bit null,\n "
+			createStmt += " bit"
 		default:
-			createStmt = createStmt + " nvarchar(512) null,\n "
+			createStmt += " nvarchar(512)"
+		}
+
+		if contains(shape.KeyNames, prop) {
+			createStmt += " NOT NULL,\n"
+		} else {
+			createStmt += " NULL,\n"
 		}
 	}
 
-	createStmt = createStmt[:len(createStmt)-2] + " )"
+	// add the primary key
+	createStmt += fmt.Sprintf("CONSTRAINT PK_%s_%s PRIMARY KEY CLUSTERED (%s)\n", schemaName, entity, strings.Join(shape.KeyNames, ","))
+
+	// Close it off
+	createStmt += ")"
 
 	_, err := db.Exec(createStmt)
 	return err
@@ -152,7 +163,7 @@ func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, propert
 		propSQLType = "bit"
 	}
 
-	altrStmt := fmt.Sprintf("alter table [%s].[%s] add column [%s] %s NULL", schemaName, entity, property, propSQLType)
+	altrStmt := fmt.Sprintf("alter table [%s].[%s] add [%s] %s NULL", schemaName, entity, property, propSQLType)
 
 	_, err := db.Exec(altrStmt)
 	return err
@@ -160,35 +171,58 @@ func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, propert
 }
 
 func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, dataPoint pipeline.DataPoint) error {
-	var columnStr, valueStr string
-	upsertStmt := fmt.Sprintf("insert into [%s].[%s]\n", schemaName, entity)
+	var columnStr, valueStr, updateStr, keyClauseStr string
+	insertStmt := fmt.Sprintf("IF @@rowcount = 0 \ninsert into [%s].[%s]\n", schemaName, entity)
+	updateStmt := fmt.Sprintf("update [%s].[%s] SET\n", schemaName, entity)
 
 	for _, propAndType := range dataPoint.Shape.Properties {
 		sepIdx := strings.Index(propAndType, ":")
 		prop := normalizePropertyName(propAndType[:sepIdx])
 		propType := propAndType[(sepIdx + 1):]
+		isKey := contains(dataPoint.Shape.KeyNames, prop)
 
-		columnStr = columnStr + "[" + prop + "],"
+		columnStr += "[" + prop + "],"
+		updateStr += "[" + prop + "] = "
+
+		if isKey {
+			keyClauseStr += "[" + prop + "] = "
+		}
 
 		rawValue, ok := dataPoint.Data[prop]
 		if !ok || rawValue == nil {
-			valueStr = valueStr + " NULL,"
+			valueStr += " NULL,"
+			updateStr += " NULL,"
 		} else {
 			switch propType {
 			case "number":
-				valueStr = valueStr + fmt.Sprintf("%f,", rawValue)
-			default:
-				valueStr = valueStr + fmt.Sprintf("'%v',", rawValue)
-			}
+				valueStr += fmt.Sprintf("%f,", rawValue)
+				updateStr += fmt.Sprintf("%f,", rawValue)
 
+				if isKey {
+					keyClauseStr += fmt.Sprintf("%f AND ", rawValue)
+				}
+			default:
+				valueStr += fmt.Sprintf("'%v',", rawValue)
+				updateStr += fmt.Sprintf("'%v',", rawValue)
+
+				if isKey {
+					keyClauseStr += fmt.Sprintf("'%v' AND ", rawValue)
+				}
+			}
 		}
 	}
 
+	// Trim off the trailing commas and "AND"s
 	columnStr = columnStr[:len(columnStr)-1]
 	valueStr = valueStr[:len(valueStr)-1]
+	updateStr = updateStr[:len(updateStr)-1]
+	keyClauseStr = keyClauseStr[:len(keyClauseStr)-4]
 
-	upsertStmt = upsertStmt + fmt.Sprintf("( %s ) VALUES ( %s )", columnStr, valueStr)
+	updateStmt += fmt.Sprintf("%s WHERE %s", updateStr, keyClauseStr)
+	insertStmt += fmt.Sprintf("( %s ) VALUES ( %s )", columnStr, valueStr)
 
+	upsertStmt := fmt.Sprintf("BEGIN TRANSACTION\n %s \n %s \nCOMMIT TRANSACTION", updateStmt, insertStmt)
+	ctx.Logger.Debug("Running Upsert: " + updateStmt)
 	_, err := db.Exec(upsertStmt)
 	if err != nil {
 		ctx.Logger.Debugf("%s", upsertStmt)
