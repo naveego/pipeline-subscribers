@@ -21,8 +21,6 @@ func NewSubscriber() subscriber.Subscriber {
 
 func (s *Subscriber) Init(ctx subscriber.Context) error {
 
-	ctx.Logger.Info("Initializing Subscriber")
-
 	connectionString, ok := getStringSetting(ctx.Subscriber.Settings, "connection_string")
 	if !ok {
 		ctx.Logger.Fatal("The connection_string setting was not provided or was not a valid string")
