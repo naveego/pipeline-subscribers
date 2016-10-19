@@ -39,6 +39,8 @@ func (s *Subscriber) Init(ctx subscriber.Context) error {
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeInfo, dataPoint pipeline.DataPoint) {
 
+	ctx.Logger.Debug("MSSQL Subscriber: Receiving Message")
+
 	schemaName := getSchemaName(dataPoint)
 	if !contains(s.ensuredSchemas, schemaName) {
 		if err := ensureSchema(ctx, s.db, schemaName); err != nil {
@@ -59,14 +61,13 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeI
 		for prop, pType := range shapeInfo.NewProperties {
 			err := addProperty(ctx, s.db, schemaName, dataPoint.Entity, prop, pType)
 			if err != nil {
-				ctx.Logger.Errorf("Could not add property '%s' to entity '%s': %v", prop, dataPoint.Entity, err)
-				return
+				ctx.Logger.Warnf("Could not add property '%s' to entity '%s': %v", prop, dataPoint.Entity, err)
 			}
 		}
 	}
 
 	ctx.Logger.Debug("Upserting Data")
-	if err := upsertData(ctx, s.db, schemaName, dataPoint.Entity, dataPoint); err != nil {
+	if err := upsertData(ctx, s.db, schemaName, dataPoint.Entity, dataPoint, shapeInfo.Shape); err != nil {
 		ctx.Logger.Errorf("Could not upsert data point to entity '%s': %v", dataPoint.Entity, err)
 	}
 }
@@ -119,6 +120,11 @@ func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, 
 		prop := normalizePropertyName(propAndType[:sepIdx])
 		propType := propAndType[(sepIdx + 1):]
 
+		// If prop type is unknown we cannot create it yet
+		if propType == "unknown" {
+			continue
+		}
+
 		createStmt = createStmt + "[" + prop + "] "
 
 		switch propType {
@@ -140,7 +146,8 @@ func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, 
 	}
 
 	// add the primary key
-	createStmt += fmt.Sprintf("CONSTRAINT PK_%s_%s PRIMARY KEY CLUSTERED (%s)\n", schemaName, entity, strings.Join(shape.KeyNames, ","))
+	pKeys := "[" + strings.Join(shape.KeyNames, "],[") + "]"
+	createStmt += fmt.Sprintf("CONSTRAINT PK_%s_%s PRIMARY KEY CLUSTERED (%s)\n", schemaName, entity, pKeys)
 
 	// Close it off
 	createStmt += ")"
@@ -152,7 +159,7 @@ func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, 
 
 func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, property, propType string) error {
 
-	propSQLType := "nvarchar(512)"
+	var propSQLType string
 
 	switch propType {
 	case "number":
@@ -161,24 +168,33 @@ func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, propert
 		propSQLType = "smalldatetime"
 	case "bool":
 		propSQLType = "bit"
+	default:
+		propSQLType = "nvarchar(512)"
 	}
 
 	altrStmt := fmt.Sprintf("alter table [%s].[%s] add [%s] %s NULL", schemaName, entity, property, propSQLType)
 
 	_, err := db.Exec(altrStmt)
+
 	return err
 
 }
 
-func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, dataPoint pipeline.DataPoint) error {
+func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, dataPoint pipeline.DataPoint, shape pipeline.Shape) error {
 	var columnStr, valueStr, updateStr, keyClauseStr string
 	insertStmt := fmt.Sprintf("IF @@rowcount = 0 \ninsert into [%s].[%s]\n", schemaName, entity)
 	updateStmt := fmt.Sprintf("update [%s].[%s] SET\n", schemaName, entity)
 
-	for _, propAndType := range dataPoint.Shape.Properties {
+	for _, propAndType := range shape.Properties {
 		sepIdx := strings.Index(propAndType, ":")
 		prop := normalizePropertyName(propAndType[:sepIdx])
 		propType := propAndType[(sepIdx + 1):]
+
+		// if the prop type is unknown we cannot insert the data
+		if propType == "unknown" {
+			continue
+		}
+
 		isKey := contains(dataPoint.Shape.KeyNames, prop)
 
 		columnStr += "[" + prop + "],"
@@ -221,7 +237,7 @@ func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, d
 	updateStmt += fmt.Sprintf("%s WHERE %s", updateStr, keyClauseStr)
 	insertStmt += fmt.Sprintf("( %s ) VALUES ( %s )", columnStr, valueStr)
 
-	upsertStmt := fmt.Sprintf("BEGIN TRANSACTION\n %s \n %s \nCOMMIT TRANSACTION", updateStmt, insertStmt)
+	upsertStmt := fmt.Sprintf("%s\n %s", updateStmt, insertStmt)
 	ctx.Logger.Debug("Running Upsert: " + updateStmt)
 	_, err := db.Exec(upsertStmt)
 	if err != nil {
