@@ -211,6 +211,7 @@ func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, d
 		} else {
 			switch propType {
 			case "number":
+
 				valueStr += fmt.Sprintf("%f,", rawValue)
 				updateStr += fmt.Sprintf("%f,", rawValue)
 
@@ -218,8 +219,9 @@ func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, d
 					keyClauseStr += fmt.Sprintf("%f AND ", rawValue)
 				}
 			default:
-				valueStr += fmt.Sprintf("'%v',", rawValue)
-				updateStr += fmt.Sprintf("'%v',", rawValue)
+				safeStr := normalizeValueString(rawValue)
+				valueStr += fmt.Sprintf("%v,", safeStr)
+				updateStr += fmt.Sprintf("%v,", safeStr)
 
 				if isKey {
 					keyClauseStr += fmt.Sprintf("'%v' AND ", rawValue)
@@ -250,6 +252,11 @@ func normalizePropertyName(propName string) string {
 	propName = strings.Replace(propName, "[", "", -1)
 	propName = strings.Replace(propName, "]", "", -1)
 	return propName
+}
+
+func normalizeValueString(value interface{}) string {
+	v := fmt.Sprintf("%v", value)
+	return "'" + strings.Replace(v, "'", "''", -1) + "'"
 }
 
 func getStringSetting(settings map[string]interface{}, name string) (string, bool) {
