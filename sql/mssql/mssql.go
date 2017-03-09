@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
@@ -50,6 +51,66 @@ func (p *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, 
 	}
 
 	return getTableShapes(ctx.Subscriber.Settings)
+}
+
+func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+	mr := utils.NewMapReader(ctx.Subscriber.Settings)
+	cmdType, _ := mr.ReadString("command_type")
+	if cmdType == "stored procedure" {
+		return receiveShapeToSP(ctx, shape, dataPoint)
+	}
+
+	return nil
+}
+
+func receiveShapeToSP(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+	connString, err := buildConnectionString(ctx.Subscriber.Settings, 30)
+	if err != nil {
+		return err
+	}
+	conn, err := sql.Open("mssql", connString)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	schemaName := "dbo"
+	spName := shape.Name
+
+	if strings.Contains(shape.Name, "__") {
+		idx := strings.Index(shape.Name, "__")
+		schemaName = spName[:idx]
+		spName = spName[idx+2:]
+	}
+
+	valCount := len(ctx.Pipeline.Mappings)
+	vals := make([]interface{}, valCount)
+	for i := 0; i < valCount; i++ {
+		vals[i] = new(interface{})
+	}
+
+	params := []string{}
+	index := 1
+	for _, m := range ctx.Pipeline.Mappings {
+		p := fmt.Sprintf(" %s = ?%d", m.To, index)
+		params = append(params, p)
+
+		if v, ok := dataPoint.Data[m.From]; ok {
+			vals[index-1] = v
+		}
+
+		index++
+	}
+
+	paramsStr := strings.Join(params, ",")
+	cmd := fmt.Sprintf("EXEC [%s].[%s] %s", schemaName, spName, paramsStr)
+	logrus.Infof("Command: %s", cmd)
+	_, e := conn.Exec(cmd, vals...)
+	if e != nil {
+		return e
+	}
+
+	return nil
 }
 
 func getSPShapes(settings map[string]interface{}) (pipeline.ShapeDefinitions, error) {
@@ -111,7 +172,7 @@ func getShapes(settings map[string]interface{}, query string) (pipeline.ShapeDef
 
 		shapeName := tableName
 		if schemaName != "dbo" {
-			shapeName = fmt.Sprintf("%s_%s", schemaName, tableName)
+			shapeName = fmt.Sprintf("%s__%s", schemaName, tableName)
 		}
 
 		shapeDef, ok := s[shapeName]
