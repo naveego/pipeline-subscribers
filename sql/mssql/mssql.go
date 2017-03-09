@@ -2,12 +2,15 @@ package mssql
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
+	"github.com/naveego/api/utils"
 )
 
 type Subscriber struct {
@@ -19,267 +22,173 @@ func NewSubscriber() subscriber.Subscriber {
 	return &Subscriber{}
 }
 
-func (s *Subscriber) Init(ctx subscriber.Context) error {
-
-	connectionString, ok := getStringSetting(ctx.Subscriber.Settings, "connection_string")
-	if !ok {
-		ctx.Logger.Fatal("The connection_string setting was not provided or was not a valid string")
-	}
-
-	db, err := sql.Open("mssql", connectionString)
+func (p *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[string]interface{}) (bool, string, error) {
+	connString, err := buildConnectionString(connSettings, 10)
 	if err != nil {
-		ctx.Logger.Fatalf("Could not connect to SQL Database: %v", err)
-		return err
+		return false, "could not connect to server", err
 	}
-
-	s.db = db
-
-	return nil
-}
-
-func (s *Subscriber) Receive(ctx subscriber.Context, shapeInfo subscriber.ShapeInfo, dataPoint pipeline.DataPoint) {
-
-	ctx.Logger.Debug("MSSQL Subscriber: Receiving Message")
-
-	schemaName := getSchemaName(dataPoint)
-	if !contains(s.ensuredSchemas, schemaName) {
-		if err := ensureSchema(ctx, s.db, schemaName); err != nil {
-			ctx.Logger.Errorf("Could not ensure schema '%s': %v", schemaName, err)
-			return
-		}
-		s.ensuredSchemas = append(s.ensuredSchemas, schemaName)
-	}
-
-	if shapeInfo.IsNew {
-		err := createShape(ctx, s.db, schemaName, dataPoint.Entity, shapeInfo.Shape)
-		if err != nil {
-			ctx.Logger.Errorf("Could not create shape for '%s': %v", dataPoint.Entity, err)
-			return
-		}
-	} else if shapeInfo.HasNewProperties {
-
-		for prop, pType := range shapeInfo.NewProperties {
-			err := addProperty(ctx, s.db, schemaName, dataPoint.Entity, prop, pType)
-			if err != nil {
-				ctx.Logger.Warnf("Could not add property '%s' to entity '%s': %v", prop, dataPoint.Entity, err)
-			}
-		}
-	}
-
-	ctx.Logger.Debug("Upserting Data")
-	if err := upsertData(ctx, s.db, schemaName, dataPoint.Entity, dataPoint, shapeInfo.Shape); err != nil {
-		ctx.Logger.Errorf("Could not upsert data point to entity '%s': %v", dataPoint.Entity, err)
-	}
-}
-
-func getSchemaName(dataPoint pipeline.DataPoint) string {
-	if dataPoint.Source == "" {
-		return "dbo"
-	}
-	return strings.ToLower(dataPoint.Source)
-}
-
-func ensureSchema(ctx subscriber.Context, db *sql.DB, schemaName string) error {
-
-	exists, err := schemaExists(ctx, db, schemaName)
+	conn, err := sql.Open("mssql", connString)
 	if err != nil {
-		return err
+		return false, "could not connect to server", err
 	}
+	defer conn.Close()
 
-	if !exists {
-		ctx.Logger.Infof("Creating Schema %s", schemaName)
-		_, err = db.Exec(fmt.Sprintf("create schema [%s]", schemaName))
-	}
-
-	return err
-}
-
-func schemaExists(ctx subscriber.Context, db *sql.DB, schemaName string) (bool, error) {
-	stmt, err := db.Prepare(fmt.Sprintf("select count(*) from sys.schemas where name='%s'", schemaName))
+	stmt, err := conn.Prepare("select 1")
 	if err != nil {
-		return false, err
+		return false, "could not connect to server", err
 	}
 	defer stmt.Close()
-	row := stmt.QueryRow()
 
-	var count int64
-	err = row.Scan(&count)
+	return true, "successfully connected to server", nil
+}
+
+func (p *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
+	mr := utils.NewMapReader(ctx.Subscriber.Settings)
+	cmdType, _ := mr.ReadString("command_type")
+	if cmdType == "stored procedure" {
+		return getSPShapes(ctx.Subscriber.Settings)
+	}
+
+	return getTableShapes(ctx.Subscriber.Settings)
+}
+
+func getSPShapes(settings map[string]interface{}) (pipeline.ShapeDefinitions, error) {
+	q := `select s.Name, o.Name, c.Name, ty.name from
+			sys.procedures o
+			INNER JOIN sys.schemas s ON (o.schema_id = s.schema_id)
+			INNER JOIN sys.parameters c ON (o.object_id = c.object_id)
+			INNER JOIN sys.types ty ON (c.user_type_id = ty.user_type_id)
+			WHERE c.is_output = 0
+			ORDER BY s.Name, o.Name, c.parameter_id`
+
+	return getShapes(settings, q)
+}
+
+func getTableShapes(settings map[string]interface{}) (pipeline.ShapeDefinitions, error) {
+	q := `select s.Name, o.Name, c.Name, ty.name from
+		sys.objects o
+		INNER JOIN sys.schemas s ON (o.schema_id = s.schema_id)
+		INNER JOIN sys.columns c ON (o.object_id = c.object_id)
+		INNER JOIN sys.types ty ON (c.user_type_id = ty.user_type_id)
+		where type IN ('U', 'V')
+		ORDER BY s.Name, o.Name, c.column_id`
+
+	return getShapes(settings, q)
+}
+
+func getShapes(settings map[string]interface{}, query string) (pipeline.ShapeDefinitions, error) {
+	defs := pipeline.ShapeDefinitions{}
+
+	connString, err := buildConnectionString(settings, 30)
 	if err != nil {
-		return false, err
+		return defs, err
 	}
+	conn, err := sql.Open("mssql", connString)
+	if err != nil {
+		return defs, err
+	}
+	defer conn.Close()
 
-	return count > 0, nil
-}
+	rows, err := conn.Query(query)
 
-func createShape(ctx subscriber.Context, db *sql.DB, schemaName, entity string, shape pipeline.Shape) error {
-	createStmt := fmt.Sprintf("create table [%s].[%s] ( \n", schemaName, entity)
+	if err != nil {
+		return defs, err
+	}
+	defer rows.Close()
 
-	for _, propAndType := range shape.Properties {
+	var schemaName string
+	var tableName string
+	var columnName string
+	var columnType string
 
-		sepIdx := strings.Index(propAndType, ":")
-		prop := normalizePropertyName(propAndType[:sepIdx])
-		propType := propAndType[(sepIdx + 1):]
+	s := map[string]*pipeline.ShapeDefinition{}
 
-		// If prop type is unknown we cannot create it yet
-		if propType == "unknown" {
+	for rows.Next() {
+		err = rows.Scan(&schemaName, &tableName, &columnName, &columnType)
+		if err != nil {
 			continue
 		}
 
-		createStmt = createStmt + "[" + prop + "] "
-
-		switch propType {
-		case "number":
-			createStmt += " decimal(18,4)"
-		case "date":
-			createStmt += " smalldatetime"
-		case "bool":
-			createStmt += " bit"
-		default:
-			createStmt += " nvarchar(512)"
+		shapeName := tableName
+		if schemaName != "dbo" {
+			shapeName = fmt.Sprintf("%s_%s", schemaName, tableName)
 		}
 
-		if contains(shape.KeyNames, prop) {
-			createStmt += " NOT NULL,\n"
-		} else {
-			createStmt += " NULL,\n"
-		}
-	}
-
-	// add the primary key
-	pKeys := "[" + strings.Join(shape.KeyNames, "],[") + "]"
-	createStmt += fmt.Sprintf("CONSTRAINT PK_%s_%s PRIMARY KEY CLUSTERED (%s)\n", schemaName, entity, pKeys)
-
-	// Close it off
-	createStmt += ")"
-
-	_, err := db.Exec(createStmt)
-	return err
-
-}
-
-func addProperty(ctx subscriber.Context, db *sql.DB, schemaName, entity, property, propType string) error {
-
-	var propSQLType string
-
-	switch propType {
-	case "number":
-		propSQLType = "decimal(18,4)"
-	case "date":
-		propSQLType = "smalldatetime"
-	case "bool":
-		propSQLType = "bit"
-	default:
-		propSQLType = "nvarchar(512)"
-	}
-
-	altrStmt := fmt.Sprintf("alter table [%s].[%s] add [%s] %s NULL", schemaName, entity, property, propSQLType)
-
-	_, err := db.Exec(altrStmt)
-
-	return err
-
-}
-
-func upsertData(ctx subscriber.Context, db *sql.DB, schemaName, entity string, dataPoint pipeline.DataPoint, shape pipeline.Shape) error {
-	var columnStr, valueStr, updateStr, keyClauseStr string
-	insertStmt := fmt.Sprintf("IF @@rowcount = 0 \ninsert into [%s].[%s]\n", schemaName, entity)
-	updateStmt := fmt.Sprintf("update [%s].[%s] SET\n", schemaName, entity)
-
-	for _, propAndType := range shape.Properties {
-		sepIdx := strings.Index(propAndType, ":")
-		prop := normalizePropertyName(propAndType[:sepIdx])
-		propType := propAndType[(sepIdx + 1):]
-
-		// if the prop type is unknown we cannot insert the data
-		if propType == "unknown" {
-			continue
-		}
-
-		isKey := contains(dataPoint.Shape.KeyNames, prop)
-
-		columnStr += "[" + prop + "],"
-		updateStr += "[" + prop + "] = "
-
-		if isKey {
-			keyClauseStr += "[" + prop + "] = "
-		}
-
-		rawValue, ok := dataPoint.Data[prop]
-		if !ok || rawValue == nil {
-			valueStr += " NULL,"
-			updateStr += " NULL,"
-		} else {
-			switch propType {
-			case "number":
-
-				valueStr += fmt.Sprintf("%f,", rawValue)
-				updateStr += fmt.Sprintf("%f,", rawValue)
-
-				if isKey {
-					keyClauseStr += fmt.Sprintf("%f AND ", rawValue)
-				}
-			default:
-				safeStr := normalizeValueString(rawValue)
-				valueStr += fmt.Sprintf("%v,", safeStr)
-				updateStr += fmt.Sprintf("%v,", safeStr)
-
-				if isKey {
-					keyClauseStr += fmt.Sprintf("'%v' AND ", rawValue)
-				}
+		shapeDef, ok := s[shapeName]
+		if !ok {
+			shapeDef = &pipeline.ShapeDefinition{
+				Name: shapeName,
 			}
+			s[shapeName] = shapeDef
 		}
+
+		shapeDef.Properties = append(shapeDef.Properties, pipeline.PropertyDefinition{
+			Name: columnName,
+			Type: convertSQLType(columnType),
+		})
 	}
 
-	// Trim off the trailing commas and "AND"s
-	columnStr = columnStr[:len(columnStr)-1]
-	valueStr = valueStr[:len(valueStr)-1]
-	updateStr = updateStr[:len(updateStr)-1]
-	keyClauseStr = keyClauseStr[:len(keyClauseStr)-4]
-
-	updateStmt += fmt.Sprintf("%s WHERE %s", updateStr, keyClauseStr)
-	insertStmt += fmt.Sprintf("( %s ) VALUES ( %s )", columnStr, valueStr)
-
-	upsertStmt := fmt.Sprintf("%s\n %s", updateStmt, insertStmt)
-	ctx.Logger.Debug("Running Upsert: " + updateStmt)
-	_, err := db.Exec(upsertStmt)
-	if err != nil {
-		ctx.Logger.Debugf("%s", upsertStmt)
+	for _, sd := range s {
+		defs = append(defs, *sd)
 	}
-	return err
+
+	// Sort the shapes by Name
+	sort.Sort(pipeline.SortShapesByName(defs))
+
+	return defs, nil
 }
 
-func normalizePropertyName(propName string) string {
-	propName = strings.Replace(propName, "[", "", -1)
-	propName = strings.Replace(propName, "]", "", -1)
-	return propName
-}
-
-func normalizeValueString(value interface{}) string {
-	v := fmt.Sprintf("%v", value)
-	return "'" + strings.Replace(v, "'", "''", -1) + "'"
-}
-
-func getStringSetting(settings map[string]interface{}, name string) (string, bool) {
-
-	rawValue, ok := settings[name]
+func buildConnectionString(settings map[string]interface{}, timeout int) (string, error) {
+	mr := utils.NewMapReader(settings)
+	server, ok := mr.ReadString("server")
 	if !ok {
-		return "", false
+		return "", errors.New("server cannot be null or empty")
 	}
-
-	val, ok := rawValue.(string)
+	db, ok := mr.ReadString("database")
 	if !ok {
-		return "", false
+		return "", errors.New("database cannot be null or empty")
+	}
+	auth, ok := mr.ReadString("auth")
+	if !ok {
+		return "", errors.New("auth type must be provided")
 	}
 
-	return val, true
+	connStr := []string{
+		"server=" + server,
+		"database=" + db,
+		"connection timeout=10",
+	}
 
+	if auth == "sql" {
+		username, _ := mr.ReadString("username")
+		pwd, _ := mr.ReadString("password")
+		connStr = append(connStr, "user id="+username)
+		connStr = append(connStr, "password="+pwd)
+	}
+
+	return strings.Join(connStr, ";"), nil
 }
 
-func contains(a []string, value string) bool {
-	for _, v := range a {
-		if v == value {
-			return true
-		}
+func convertSQLType(t string) string {
+	switch t {
+	case "datetime":
+	case "date":
+	case "time":
+	case "smalldatetime":
+		return "date"
+	case "bigint":
+	case "int":
+	case "smallint":
+	case "tinyint":
+		return "integer"
+	case "decimal":
+	case "float":
+	case "money":
+	case "smallmoney":
+		return "float"
+	case "bit":
+		return "bool"
 	}
-	return false
+
+	return "string"
 }
