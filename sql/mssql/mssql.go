@@ -60,6 +60,59 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinit
 		return receiveShapeToSP(ctx, shape, dataPoint)
 	}
 
+	return receiveShapeToTable(ctx, shape, dataPoint)
+}
+
+func receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+	connString, err := buildConnectionString(ctx.Subscriber.Settings, 30)
+	if err != nil {
+		return err
+	}
+	conn, err := sql.Open("mssql", connString)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	schemaName := "dbo"
+	tableName := shape.Name
+
+	if strings.Contains(shape.Name, "__") {
+		idx := strings.Index(shape.Name, "__")
+		schemaName = tableName[:idx]
+		tableName = tableName[idx+2:]
+	}
+
+	valCount := len(ctx.Pipeline.Mappings)
+	vals := make([]interface{}, valCount)
+	for i := 0; i < valCount; i++ {
+		vals[i] = new(interface{})
+	}
+
+	colNames := []string{}
+	params := []string{}
+	index := 1
+	for _, m := range ctx.Pipeline.Mappings {
+		p := fmt.Sprintf("?%d", index)
+		params = append(params, p)
+		colNames = append(colNames, m.To)
+
+		if v, ok := dataPoint.Data[m.From]; ok {
+			vals[index-1] = v
+		}
+
+		index++
+	}
+
+	colNameStr := strings.Join(colNames, ",")
+	paramsStr := strings.Join(params, ",")
+	cmd := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES (%s)", schemaName, tableName, colNameStr, paramsStr)
+	logrus.Infof("Command: %s", cmd)
+	_, e := conn.Exec(cmd, vals...)
+	if e != nil {
+		return e
+	}
+
 	return nil
 }
 
