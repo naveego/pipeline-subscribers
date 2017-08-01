@@ -23,7 +23,29 @@ func NewSubscriber() subscriber.Subscriber {
 	return &Subscriber{}
 }
 
-func (p *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[string]interface{}) (bool, string, error) {
+func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{}) error {
+
+	// Init may be called multiple times, so we need to close an Open
+	// connection from a previous call
+	if s.db != nil {
+		s.db.Close()
+		s.db = nil
+	}
+
+	connString, err := buildConnectionString(settings, 10)
+	if err != nil {
+		return fmt.Errorf("could not connect to server: %v", err)
+	}
+	db, err := sql.Open("mssql", connString)
+	if err != nil {
+		return fmt.Errorf("could not connect to server: %v", err)
+	}
+
+	s.db = db
+	return nil
+}
+
+func (s *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[string]interface{}) (bool, string, error) {
 	connString, err := buildConnectionString(connSettings, 10)
 	if err != nil {
 		return false, "could not connect to server", err
@@ -43,7 +65,7 @@ func (p *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[str
 	return true, "successfully connected to server", nil
 }
 
-func (p *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
+func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
 	mr := utils.NewMapReader(ctx.Subscriber.Settings)
 	cmdType, _ := mr.ReadString("command_type")
 	if cmdType == "stored procedure" {
@@ -57,23 +79,25 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinit
 	mr := utils.NewMapReader(ctx.Subscriber.Settings)
 	cmdType, _ := mr.ReadString("command_type")
 	if cmdType == "stored procedure" {
-		return receiveShapeToSP(ctx, shape, dataPoint)
+		return s.receiveShapeToSP(ctx, shape, dataPoint)
 	}
 
-	return receiveShapeToTable(ctx, shape, dataPoint)
+	return s.receiveShapeToTable(ctx, shape, dataPoint)
 }
 
-func receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
-	connString, err := buildConnectionString(ctx.Subscriber.Settings, 30)
-	if err != nil {
-		return err
+func (s *Subscriber) Dispose(ctx subscriber.Context) error {
+	if s.db != nil {
+		err := s.db.Close()
+		s.db = nil
+		if err != nil {
+			return err
+		}
 	}
-	conn, err := sql.Open("mssql", connString)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 
+	return nil
+}
+
+func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
 	schemaName := "dbo"
 	tableName := shape.Name
 
@@ -108,7 +132,7 @@ func receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition,
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES (%s)", schemaName, tableName, colNameStr, paramsStr)
 	logrus.Infof("Command: %s", cmd)
-	_, e := conn.Exec(cmd, vals...)
+	_, e := s.db.Exec(cmd, vals...)
 	if e != nil {
 		return e
 	}
@@ -116,17 +140,7 @@ func receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition,
 	return nil
 }
 
-func receiveShapeToSP(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
-	connString, err := buildConnectionString(ctx.Subscriber.Settings, 30)
-	if err != nil {
-		return err
-	}
-	conn, err := sql.Open("mssql", connString)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
+func (s *Subscriber) receiveShapeToSP(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
 	schemaName := "dbo"
 	spName := shape.Name
 
@@ -158,7 +172,7 @@ func receiveShapeToSP(ctx subscriber.Context, shape pipeline.ShapeDefinition, da
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("EXEC [%s].[%s] %s", schemaName, spName, paramsStr)
 	logrus.Infof("Command: %s", cmd)
-	_, e := conn.Exec(cmd, vals...)
+	_, e := s.db.Exec(cmd, vals...)
 	if e != nil {
 		return e
 	}
