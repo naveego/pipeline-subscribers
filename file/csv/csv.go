@@ -41,7 +41,7 @@ func (s *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[str
 func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
 	shapes := pipeline.ShapeDefinitions{}
 	shapes = append(shapes, pipeline.ShapeDefinition{
-		Name: "person",
+		Name: "File",
 		Keys: []string{"id"},
 		Properties: []pipeline.PropertyDefinition{
 			pipeline.PropertyDefinition{
@@ -58,7 +58,12 @@ func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, 
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
-	s.out.WriteString("This worked \r\n")
+
+	str := ""
+	for _, v := range dataPoint.Data {
+		str = str + fmt.Sprintf("%v,", v)
+	}
+	s.out.WriteString(str + "\r\n")
 	return nil
 }
 
