@@ -66,12 +66,18 @@ func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, 
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
-
 	str := ""
-	for _, v := range dataPoint.Data {
-		str = str + fmt.Sprintf("%v,", v)
+
+	for _, m := range ctx.Pipeline.Mappings {
+		valStr := ""
+
+		if v, ok := dataPoint.Data[m.From]; ok {
+			valStr = valStr + fmt.Sprintf("%v", v) + s.columnSeparator
+		}
 	}
-	s.out.WriteString(str + "\r\n")
+
+	fmt.Fprintf(s.out, str+s.rowSeparator)
+
 	return nil
 }
 
