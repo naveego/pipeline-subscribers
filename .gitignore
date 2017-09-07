@@ -19,6 +19,8 @@ _cgo_export.*
 
 _testmain.go
 
+debug
 *.exe
+*.exe~
 *.test
 *.prof

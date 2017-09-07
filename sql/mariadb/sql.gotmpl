@@ -1,0 +1,6 @@
+INSERT INTO {{tick .Name}} ({{jointick .Columns}})
+	VALUES ({{range $i, $e := .Values}}{{if $i}},{{end}}{{escape $e}}{{end}})
+	ON DUPLICATE KEY UPDATE
+	{{range $i, $e := .Values}}{{if $i}},{{end}}SET {{escape $e}}{{end}}
+,DROP PRIMARY KEY
+,ADD PRIMARY KEY ({{jointick .Keys}}){{end}};
