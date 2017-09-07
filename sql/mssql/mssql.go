@@ -7,15 +7,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
 )
 
+var batchSize = 1000
+
 type Subscriber struct {
-	db             *sql.DB  // The connection to the database
+	db             *sql.DB // The connection to the database
+	tx             *sql.Tx // The current transaction
+	count          int
 	ensuredSchemas []string // An array of schema names that have already been ensured by this subscriber
 }
 
@@ -41,6 +44,12 @@ func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{
 		return fmt.Errorf("could not connect to server: %v", err)
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("could not start initial transaction: %v", err)
+	}
+
+	s.tx = tx
 	s.db = db
 	return nil
 }
@@ -76,6 +85,22 @@ func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, 
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+
+	if s.count >= batchSize {
+		err := s.tx.Commit()
+		if err != nil {
+			return err
+		}
+
+		s.tx, err = s.db.Begin()
+		if err != nil {
+			return err
+		}
+
+		s.count = 0
+	}
+
+	s.count++
 	mr := utils.NewMapReader(ctx.Subscriber.Settings)
 	cmdType, _ := mr.ReadString("command_type")
 	if cmdType == "stored procedure" {
@@ -87,6 +112,7 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinit
 
 func (s *Subscriber) Dispose(ctx subscriber.Context) error {
 	if s.db != nil {
+		s.tx.Commit()
 		err := s.db.Close()
 		s.db = nil
 		if err != nil {
@@ -131,8 +157,8 @@ func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.
 	colNameStr := strings.Join(colNames, ",")
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES (%s)", schemaName, tableName, colNameStr, paramsStr)
-	logrus.Infof("Command: %s", cmd)
-	_, e := s.db.Exec(cmd, vals...)
+
+	_, e := s.tx.Exec(cmd, vals...)
 	if e != nil {
 		return e
 	}
@@ -171,8 +197,7 @@ func (s *Subscriber) receiveShapeToSP(ctx subscriber.Context, shape pipeline.Sha
 
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("EXEC [%s].[%s] %s", schemaName, spName, paramsStr)
-	logrus.Infof("Command: %s", cmd)
-	_, e := s.db.Exec(cmd, vals...)
+	_, e := s.tx.Exec(cmd, vals...)
 	if e != nil {
 		return e
 	}

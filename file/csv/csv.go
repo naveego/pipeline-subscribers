@@ -1,7 +1,9 @@
 package csv
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 
 	"github.com/naveego/api/pipeline/subscriber"
@@ -10,7 +12,11 @@ import (
 )
 
 type Subscriber struct {
-	out *os.File
+	out             *os.File
+	shape           pipeline.ShapeDefinition
+	rowSeparator    string
+	columnSeparator string
+	quoteCharacter  string
 }
 
 func NewSubscriber() subscriber.Subscriber {
@@ -19,6 +25,11 @@ func NewSubscriber() subscriber.Subscriber {
 
 func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{}) error {
 	mr := utils.NewMapReader(settings)
+
+	shapeFile, ok := mr.ReadString("shape_file")
+	if !ok {
+		return fmt.Errorf("Please provide a shape file")
+	}
 
 	outPath, ok := mr.ReadString("out")
 	if !ok {
@@ -30,6 +41,18 @@ func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{
 		return fmt.Errorf("Could not create output file: %v", err)
 	}
 
+	var shape pipeline.ShapeDefinition
+	shapeBytes, err := ioutil.ReadFile(shapeFile)
+	if err != nil {
+		return fmt.Errorf("Could not read shape file: %v", err)
+	}
+
+	err = json.Unmarshal(shapeBytes, &shape)
+	if err != nil {
+		return fmt.Errorf("Could not read shape file: %v", err)
+	}
+
+	s.shape = shape
 	s.out = out
 	return nil
 }
@@ -39,26 +62,22 @@ func (s *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[str
 }
 
 func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
-	shapes := pipeline.ShapeDefinitions{}
-	shapes = append(shapes, pipeline.ShapeDefinition{
-		Name: "person",
-		Keys: []string{"id"},
-		Properties: []pipeline.PropertyDefinition{
-			pipeline.PropertyDefinition{
-				Name: "id",
-				Type: "string",
-			},
-			pipeline.PropertyDefinition{
-				Name: "name",
-				Type: "string",
-			},
-		},
-	})
-	return shapes, nil
+	return pipeline.ShapeDefinitions{s.shape}, nil
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
-	s.out.WriteString("This worked \r\n")
+	str := ""
+
+	for _, m := range ctx.Pipeline.Mappings {
+		valStr := ""
+
+		if v, ok := dataPoint.Data[m.From]; ok {
+			valStr = valStr + fmt.Sprintf("%v", v) + s.columnSeparator
+		}
+	}
+
+	fmt.Fprintf(s.out, str+s.rowSeparator)
+
 	return nil
 }
 
