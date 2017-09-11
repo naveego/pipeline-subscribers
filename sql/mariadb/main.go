@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/naveego/pipeline-subscribers/shapeutils"
+
 	"github.com/Sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/navigator-go/subscribers/server"
@@ -31,7 +33,9 @@ func main() {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	subscriber := &mariaSubscriber{}
+	subscriber := &mariaSubscriber{
+		knownShapes: shapeutils.NewShapeCache(),
+	}
 
 	srv := server.NewSubscriberServer(addr, subscriber)
 

@@ -1,7 +1,10 @@
 package shapeutils
 
 import (
+	"sort"
+
 	"github.com/naveego/api/types/pipeline"
+	"github.com/naveego/api/utils"
 )
 
 // PropertiesAndTypes is a map that contains the property name
@@ -9,34 +12,195 @@ import (
 // the value will contain the type
 type PropertiesAndTypes map[string]string
 
-// ShapeInfo will contain information about the current data points
+// ShapeDelta will contain information about the current data points
 // shape, with respect to the pipeline shape for the same entity.
 // This information can be used by the subcriber to alter its
 // storage if necessary.
-type ShapeInfo struct {
+type ShapeDelta struct {
 	IsNew            bool
 	HasKeyChanges    bool
 	HasNewProperties bool
-	PreviousShapeDef pipeline.ShapeDefinition
-	ShapeDef         pipeline.ShapeDefinition
-	NewName          string
-	NewKeys          []string
-	NewProperties    PropertiesAndTypes
+	//PreviousShapeDef pipeline.ShapeDefinition
+	//ShapeDef         pipeline.ShapeDefinition
+	Name          string
+	NewKeys       []string
+	ExistingKeys  []string
+	NewProperties PropertiesAndTypes
 }
 
-func (si ShapeInfo) HasChanges() bool {
+type knownHashes map[uint32]bool
+
+func (k knownHashes) merge(other knownHashes) {
+	for h, v := range other {
+		k[h] = v
+	}
+}
+
+type KnownShape struct {
+	pipeline.ShapeDefinition
+
+	cache map[string]interface{}
+
+	keyHashes  knownHashes
+	propHashes knownHashes
+}
+
+// Set caches the value under key. The cache will be wiped if another shape is merged in.
+func (k *KnownShape) Set(key string, value interface{}) { k.cache[key] = value }
+
+// Get returns the value cached under key.
+func (k *KnownShape) Get(key string) (interface{}, bool) {
+	v, ok := k.cache[key]
+	return v, ok
+}
+
+func (k *KnownShape) MatchesShape(shape pipeline.Shape) bool {
+	pipeline.EnsureHashes(&shape)
+	return k.keyHashes[shape.KeyNamesHash] && k.propHashes[shape.PropertyHash]
+}
+
+func (k *KnownShape) Merge(other *KnownShape) {
+
+	k.keyHashes.merge(other.keyHashes)
+	k.propHashes.merge(other.propHashes)
+
+	seenProps := map[string]bool{}
+	allProps := []pipeline.PropertyDefinition{}
+
+	for _, p := range append(other.Properties, k.Properties...) {
+		if _, ok := seenProps[p.Name]; !ok {
+			allProps = append(allProps, p)
+			seenProps[p.Name] = true
+		}
+	}
+	k.Properties = allProps
+
+	seenKeys := map[string]bool{}
+	allKeys := []string{}
+
+	for _, p := range append(other.Keys, k.Keys...) {
+		if _, ok := seenKeys[p]; !ok {
+			allKeys = append(allKeys, p)
+			seenKeys[p] = true
+		}
+	}
+	k.Keys = allKeys
+
+	k.cache = map[string]interface{}{}
+}
+
+// NewKnownShape creates a new KnownShape from a datapoint.
+func NewKnownShape(datapoint pipeline.DataPoint) *KnownShape {
+
+	shape := datapoint.Shape
+	pipeline.EnsureHashes(&shape)
+
+	ks := KnownShape{
+		cache:      make(map[string]interface{}),
+		keyHashes:  knownHashes{shape.KeyNamesHash: true},
+		propHashes: knownHashes{shape.PropertyHash: true},
+		ShapeDefinition: pipeline.ShapeDefinition{
+			Name: canonicalName(datapoint),
+			Keys: datapoint.Shape.KeyNames,
+		},
+	}
+
+	for _, v := range datapoint.Shape.Properties {
+
+		p := pipeline.PropertyDefinition{}
+		p.Name, p.Type = utils.StringSplit2(v, ":")
+
+		ks.Properties = append(ks.Properties, p)
+	}
+
+	sort.Sort(pipeline.SortPropertyDefinitionsByName(ks.Properties))
+
+	return &ks
+
+}
+
+type ShapeCache struct {
+	shapes map[string]*KnownShape
+}
+
+func NewShapeCache() ShapeCache {
+	return ShapeCache{
+		shapes: map[string]*KnownShape{},
+	}
+}
+
+// Recognize returns the KnownShape for a datapoint if it's recognized.
+// Otherwise it returns an empty KnownShape and recognized == false.
+func (s *ShapeCache) Recognize(datapoint pipeline.DataPoint) (shape *KnownShape, recognized bool) {
+
+	name := canonicalName(datapoint)
+	shape, ok := s.shapes[name]
+
+	if !ok || !shape.MatchesShape(datapoint.Shape) {
+		return nil, false
+	}
+
+	return shape, true
+}
+
+func (s *ShapeCache) Analyze(datapoint pipeline.DataPoint) (shape *KnownShape, delta ShapeDelta) {
+
+	shape = NewKnownShape(datapoint)
+
+	oldShape, ok := s.shapes[shape.Name]
+
+	knownShapes := map[string]pipeline.ShapeDefinition{}
+
+	if ok {
+		knownShapes[shape.Name] = oldShape.ShapeDefinition
+	}
+
+	delta = GenerateShapeDelta(knownShapes, shape.ShapeDefinition)
+
+	return
+}
+
+// Remember merges the provided newShape into the cache, and returns
+// the remembered shape (which may not be the shape that was merged in).
+func (s *ShapeCache) Remember(newShape *KnownShape) (shape *KnownShape) {
+
+	oldShape, ok := s.shapes[newShape.Name]
+
+	if ok {
+		oldShape.Merge(newShape)
+		return oldShape
+	}
+
+	s.shapes[newShape.Name] = newShape
+
+	return newShape
+}
+
+// GetAllShapeDefinitions returns the ShapeDefinitions of all KnownShapes
+func (s *ShapeCache) GetAllShapeDefinitions() (shapes []pipeline.ShapeDefinition) {
+
+	for _, x := range s.shapes {
+		shapes = append(shapes, x.ShapeDefinition)
+	}
+
+	return
+}
+
+func (si ShapeDelta) HasChanges() bool {
 	return si.IsNew || si.HasKeyChanges || si.HasNewProperties
 }
 
-// GenerateShapeInfo will determine the diffferences between an existing shape and the shape of a new
+// GenerateShapeDelta will determine the diffferences between an existing shape and the shape of a new
 // data point.  If the new shape is a subset of the current shape it is not considered a change.  This
 // is due to the fact that it does not represent a change that needs to be made in the storage system.
 
-func GenerateShapeInfo(knownShapes map[string]pipeline.ShapeDefinition, shapeDef pipeline.ShapeDefinition) ShapeInfo {
+func GenerateShapeDelta(knownShapes map[string]pipeline.ShapeDefinition, shapeDef pipeline.ShapeDefinition) ShapeDelta {
 
 	// create the info
-	info := ShapeInfo{
-		ShapeDef: shapeDef,
+	info := ShapeDelta{
+		Name: shapeDef.Name,
+
+		//ShapeDef: shapeDef,
 	}
 
 	// Get the shape if we already know about it
@@ -46,7 +210,9 @@ func GenerateShapeInfo(knownShapes map[string]pipeline.ShapeDefinition, shapeDef
 	// we need to treat it as brand new
 	if !ok {
 		info.IsNew = true
-		info.NewName = shapeDef.Name
+		info.ExistingKeys = []string{}
+	} else {
+		info.ExistingKeys = prevShape.Keys
 	}
 
 	// There aren't likely to be many keys, so we brute force this check
@@ -57,14 +223,11 @@ func GenerateShapeInfo(knownShapes map[string]pipeline.ShapeDefinition, shapeDef
 		}
 	}
 
-	// Set the previous shape on the info
-	info.PreviousShapeDef = prevShape
-
 	// Properties already known, no need to change.
 	if isSubsetOf(shapeDef.Properties, prevShape.Properties) {
 		if !info.HasKeyChanges {
 			// No key changes and no property changes means we can just re-use the existing shape.
-			info.ShapeDef = prevShape
+			//info.ShapeDef = prevShape
 		}
 		return info
 	}
@@ -77,55 +240,6 @@ func GenerateShapeInfo(knownShapes map[string]pipeline.ShapeDefinition, shapeDef
 			info.NewProperties[prop.Name] = prop.Type
 		}
 	}
-
-	return info
-}
-
-// GenerateShapeInfo will determine the diffferences between an existing shape and the shape of a new
-// data point.  If the new shape is a subset of the current shape it is not considered a change.  This
-// is due to the fact that it does not represent a change that needs to be made in the storage system.
-// This alternative to GenerateShapeInfo was an attempt to improve performance, but it isn't working.
-func generateShapeInfoX(knownShapes map[string]pipeline.ShapeDefinition, shapeDef pipeline.ShapeDefinition) ShapeInfo {
-
-	// create the info
-	info := ShapeInfo{
-		ShapeDef: shapeDef,
-	}
-
-	// Get the shape if we already know about it
-	prevShape, ok := knownShapes[shapeDef.Name]
-
-	// If this shape does not exist previously then
-	// we need to treat it as brand new
-	if !ok {
-		info.IsNew = true
-		info.NewName = shapeDef.Name
-	}
-
-	// There aren't likely to be many keys, so we brute force this check
-	for _, key := range shapeDef.Keys {
-		if !contains(prevShape.Keys, key) {
-			info.NewKeys = append(info.NewKeys, key)
-			info.HasKeyChanges = true
-		}
-	}
-
-	info.NewProperties = PropertiesAndTypes{}
-
-	// First we assume all properties are new
-	for _, p := range shapeDef.Properties {
-		info.NewProperties[p.Name] = p.Type
-	}
-
-	// Then we delete all properties we already know about
-	for _, p := range prevShape.Properties {
-		delete(info.NewProperties, p.Name)
-	}
-
-	// Set the previous shape on the info
-	info.PreviousShapeDef = prevShape
-
-	info.HasNewProperties = (len(info.NewProperties) > 0)
 
 	return info
 }
@@ -176,4 +290,15 @@ func containsProp(v pipeline.PropertyDefinition, a []pipeline.PropertyDefinition
 		}
 	}
 	return false
+}
+
+func canonicalName(dp pipeline.DataPoint) string {
+	if dp.Source == "" {
+		return dp.Entity
+	}
+	if dp.Entity == "" {
+		return dp.Source
+	}
+
+	return dp.Source + "." + dp.Entity
 }

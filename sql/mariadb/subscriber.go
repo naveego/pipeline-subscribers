@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
@@ -19,8 +18,9 @@ import (
 
 type mariaSubscriber struct {
 	db             *sql.DB // The connection to the database
+	tx             *sql.Tx
 	connectionInfo string
-	knownShapes    map[string]pipeline.ShapeDefinition
+	knownShapes    shapeutils.ShapeCache
 }
 
 type settings struct {
@@ -40,10 +40,60 @@ func (h *mariaSubscriber) Init(request protocol.InitRequest) (protocol.InitRespo
 		return response, err
 	}
 
+	// Improves performance of inserts
+	_, err = h.db.Exec("SET @@session.unique_checks = 0;")
+	_, err = h.db.Exec("SET @@session.foreign_key_checks = 0;")
+	if err != nil {
+		return response, err
+	}
+
+	h.tx, err = h.db.Begin()
+
+	if err != nil {
+		return response, err
+	}
+
 	response.Message = h.connectionInfo
 	response.Success = true
 
 	return response, nil
+}
+
+func (h *mariaSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
+
+	if h.db == nil {
+		return protocol.DisposeResponse{
+			Success: true,
+			Message: "Not initialized.",
+		}, nil
+	}
+
+	var err error
+
+	if h.tx != nil {
+		err = h.tx.Commit()
+		if err != nil {
+			return protocol.DisposeResponse{
+				Success: true,
+				Message: "Error while committing transaction.",
+			}, err
+		}
+	}
+
+	err = h.db.Close()
+	h.db = nil
+
+	if err != nil {
+		return protocol.DisposeResponse{
+			Success: true,
+			Message: "Error while closing connection.",
+		}, err
+	}
+
+	return protocol.DisposeResponse{
+		Success: true,
+		Message: "Closed connection.",
+	}, nil
 }
 
 func (h *mariaSubscriber) TestConnection(request protocol.TestConnectionRequest) (protocol.TestConnectionResponse, error) {
@@ -69,10 +119,7 @@ func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest)
 		return response, err
 	}
 
-	response.Shapes = make([]pipeline.ShapeDefinition, 0, len(h.knownShapes))
-	for _, shape := range h.knownShapes {
-		response.Shapes = append(response.Shapes, shape)
-	}
+	response.Shapes = h.knownShapes.GetAllShapeDefinitions()
 
 	return response, err
 }
@@ -80,18 +127,25 @@ func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest)
 func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest) (protocol.ReceiveShapeResponse, error) {
 
 	var (
-		response = protocol.ReceiveShapeResponse{}
+		response   = protocol.ReceiveShapeResponse{}
+		knownShape *shapeutils.KnownShape
+		shapeDelta shapeutils.ShapeDelta
+		ok         bool
 	)
 
 	if h.db == nil {
 		return response, errors.New("you must call Init before sending data points")
 	}
 
-	shapeInfo := shapeutils.GenerateShapeInfo(h.knownShapes, request.Shape)
+	knownShape, ok = h.knownShapes.Recognize(request.DataPoint)
 
-	if shapeInfo.HasChanges() {
+	fmt.Println(request)
 
-		sqlCommand, err := createShapeChangeSQL(shapeInfo)
+	if !ok {
+
+		knownShape, shapeDelta = h.knownShapes.Analyze(request.DataPoint)
+
+		sqlCommand, err := createShapeChangeSQL(shapeDelta)
 		if err != nil {
 			return response, err
 		}
@@ -102,9 +156,10 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 			return response, err
 		}
 
+		knownShape = h.knownShapes.Remember(knownShape)
 	}
 
-	upsertCommand, upsertParameters, err := createUpsertSQL(request)
+	upsertCommand, upsertParameters, err := createUpsertSQL(request.DataPoint, knownShape)
 	if err != nil {
 		return response, err
 	}
@@ -113,31 +168,6 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 
 	return protocol.ReceiveShapeResponse{
 		Success: true,
-	}, nil
-}
-
-func (h *mariaSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
-
-	if h.db == nil {
-		return protocol.DisposeResponse{
-			Success: true,
-			Message: "Not initialized.",
-		}, nil
-	}
-
-	err := h.db.Close()
-	h.db = nil
-
-	if err != nil {
-		return protocol.DisposeResponse{
-			Success: true,
-			Message: "Error while closing connection.",
-		}, err
-	}
-
-	return protocol.DisposeResponse{
-		Success: true,
-		Message: "Closed connection.",
 	}, nil
 }
 
@@ -183,10 +213,10 @@ func (h *mariaSubscriber) connect(settingsMap map[string]interface{}) error {
 		return err
 	}
 
-	h.knownShapes = make(map[string]pipeline.ShapeDefinition)
+	h.knownShapes = shapeutils.NewShapeCache()
 
 	for _, shape := range shapes {
-		h.knownShapes[shape.Name] = shape
+		h.knownShapes.Remember(shape)
 	}
 
 	return nil
@@ -235,13 +265,13 @@ func (s *mariaSubscriber) receiveShapeToTable(ctx subscriber.Context, shape pipe
 	return nil
 }
 
-func (h *mariaSubscriber) getKnownShapes() (pipeline.ShapeDefinitions, error) {
+func (h *mariaSubscriber) getKnownShapes() ([]*shapeutils.KnownShape, error) {
 
 	var (
 		err        error
 		rows       *sql.Rows
 		tableNames []string
-		shapes     pipeline.ShapeDefinitions
+		shapes     []*shapeutils.KnownShape
 	)
 
 	rows, err = h.db.Query("SHOW TABLES")
@@ -263,7 +293,9 @@ func (h *mariaSubscriber) getKnownShapes() (pipeline.ShapeDefinitions, error) {
 		if err != nil {
 			return shapes, err
 		}
-		shape := pipeline.ShapeDefinition{}
+		dp := pipeline.DataPoint{
+			Shape: pipeline.Shape{},
+		}
 
 		for rows.Next() {
 			var (
@@ -278,24 +310,17 @@ func (h *mariaSubscriber) getKnownShapes() (pipeline.ShapeDefinitions, error) {
 			if err != nil {
 				return shapes, err
 			}
-			shape.Name = table
+			dp.Source = table
 			if key == "PRI" {
-				shape.Keys = append(shape.Keys, field)
+				dp.Shape.KeyNames = append(dp.Shape.KeyNames, field)
 			}
-			property := pipeline.PropertyDefinition{
-				Name: field,
-				Type: convertFromSQLType(coltype),
-			}
-
-			shape.Properties = append(shape.Properties, property)
+			dp.Shape.Properties = append(dp.Shape.Properties, field+":"+convertFromSQLType(coltype))
 		}
 
-		sort.Sort(pipeline.SortPropertyDefinitionsByName(shape.Properties))
+		shape := shapeutils.NewKnownShape(dp)
 
 		shapes = append(shapes, shape)
 	}
-
-	sort.Sort(pipeline.SortShapesByName(shapes))
 
 	return shapes, nil
 }

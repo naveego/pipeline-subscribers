@@ -7,8 +7,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/naveego/navigator-go/subscribers/protocol"
-
+	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/pipeline-subscribers/shapeutils"
 )
 
@@ -53,7 +52,7 @@ func init() {
 
 }
 
-func createShapeChangeSQL(shapeInfo shapeutils.ShapeInfo) (string, error) {
+func createShapeChangeSQL(shapeInfo shapeutils.ShapeDelta) (string, error) {
 
 	var (
 		err error
@@ -61,15 +60,15 @@ func createShapeChangeSQL(shapeInfo shapeutils.ShapeInfo) (string, error) {
 	)
 
 	model := sqlTableModel{
-		Name: escapeString(shapeInfo.ShapeDef.Name),
-		Keys: shapeInfo.ShapeDef.Keys,
+		Name: escapeString(shapeInfo.Name),
+		Keys: append(shapeInfo.NewKeys, shapeInfo.ExistingKeys...),
 	}
 	for n, t := range shapeInfo.NewProperties {
 		columnModel := sqlColumnModel{
 			Name:    escapeString(n),
 			SqlType: convertToSQLType(t),
 		}
-		for _, k := range shapeInfo.ShapeDef.Keys {
+		for _, k := range model.Keys {
 			if k == n {
 				columnModel.IsKey = true
 			}
@@ -83,6 +82,9 @@ func createShapeChangeSQL(shapeInfo shapeutils.ShapeInfo) (string, error) {
 	if shapeInfo.IsNew {
 		err = createTemplate.Execute(w, model)
 	} else {
+		if !shapeInfo.HasKeyChanges {
+			model.Keys = nil
+		}
 		err = alterTemplate.Execute(w, model)
 	}
 
@@ -115,17 +117,31 @@ func (s sqlColumns) Less(i, j int) bool {
 	return strings.Compare(s[i].Name, s[j].Name) < 0
 }
 
-func createUpsertSQL(request protocol.ReceiveShapeRequest) (sql string, params []interface{}, err error) {
+const (
+	keyUpsertSQL        = "UpsertSQL"
+	keyParameterOrderer = "ParameterOrder"
+)
 
+func createUpsertSQL(datapoint pipeline.DataPoint, knownShape *shapeutils.KnownShape) (sql string, params []interface{}, err error) {
+
+	var (
+		// 	gotOrderer bool
+		orderer func(pipeline.DataPoint) []interface{}
+	)
+
+	// item, gotSQL := knownShape.Get(keyUpsertSQL)
+	// if gotSQL {
+	// 	sql = item.(string)
+	// } else {
 	model := sqlTableModel{
-		Name: escapeString(request.Shape.Name),
+		Name: escapeString(knownShape.Name),
 	}
-	for _, p := range request.Shape.Properties {
+	for _, p := range knownShape.Properties {
 		columnModel := sqlColumnModel{
 			Name:    escapeString(p.Name),
 			SqlType: convertToSQLType(p.Type),
 		}
-		for _, k := range request.Shape.Keys {
+		for _, k := range knownShape.Keys {
 			if k == p.Name {
 				columnModel.IsKey = true
 			}
@@ -145,13 +161,28 @@ func createUpsertSQL(request protocol.ReceiveShapeRequest) (sql string, params [
 	}
 
 	sql = w.String()
+	knownShape.Set(keyUpsertSQL, sql)
+	//	}
 
-	// Populate the parameter list with values from the datapoint,
-	// in the column order.
-	for _, c := range model.Columns {
-		value := request.DataPoint.Data[c.Name]
-		params = append(params, value)
+	// item, gotOrderer = knownShape.Get(keyParameterOrderer)
+	// if gotOrderer {
+	// 	orderer = item.(func(pipeline.DataPoint) []interface{})
+	// } else {
+	orderer = func(dp pipeline.DataPoint) (p []interface{}) {
+		// Populate the parameter list with values from the datapoint,
+		// in the column order.
+		for _, c := range knownShape.Properties {
+			value := dp.Data[c.Name]
+			p = append(p, value)
+		}
+
+		return p
 	}
+
+	knownShape.Set(keyParameterOrderer, orderer)
+	//	}
+
+	params = orderer(datapoint)
 
 	return
 }
@@ -176,25 +207,15 @@ func convertFromSQLType(t string) string {
 	text := strings.ToLower(strings.Split(t, "(")[0])
 
 	switch text {
-	case "datetime":
-	case "date":
-	case "time":
-	case "smalldatetime":
+	case "datetime", "date", "time", "smalldatetime":
 		return "date"
-	case "bigint":
-	case "int":
-	case "smallint":
-	case "tinyint":
+	case "bigint", "int", "smallint", "tinyint":
 		return "integer"
-	case "decimal":
-	case "float":
-	case "money":
-	case "smallmoney":
+	case "decimal", "float", "money", "smallmoney":
 		return "float"
 	case "bit":
 		return "bool"
 	}
-
 	return "string"
 }
 
