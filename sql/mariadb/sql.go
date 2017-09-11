@@ -61,8 +61,17 @@ func createShapeChangeSQL(shapeInfo shapeutils.ShapeDelta) (string, error) {
 
 	model := sqlTableModel{
 		Name: escapeString(shapeInfo.Name),
-		Keys: append(shapeInfo.NewKeys, shapeInfo.ExistingKeys...),
+		Keys: shapeInfo.NewKeys,
 	}
+
+	if !shapeInfo.IsNew {
+		// there's a previous shape to consider,
+		// we need to include its keys when re-creating the PK
+		for _, k := range shapeInfo.PreviousShape.Keys {
+			model.Keys = append(model.Keys, k)
+		}
+	}
+
 	for n, t := range shapeInfo.NewProperties {
 		columnModel := sqlColumnModel{
 			Name:    escapeString(n),

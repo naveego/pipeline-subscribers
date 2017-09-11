@@ -137,13 +137,11 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 		return response, errors.New("you must call Init before sending data points")
 	}
 
-	knownShape, ok = h.knownShapes.Recognize(request.DataPoint)
-
-	fmt.Println(request)
+	knownShape, ok = h.knownShapes.GetKnownShape(request.DataPoint)
 
 	if !ok {
 
-		knownShape, shapeDelta = h.knownShapes.Analyze(request.DataPoint)
+		shapeDelta = h.knownShapes.Analyze(request.DataPoint)
 
 		sqlCommand, err := createShapeChangeSQL(shapeDelta)
 		if err != nil {
@@ -153,10 +151,11 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 		_, err = h.db.Exec(sqlCommand)
 
 		if err != nil {
+			logrus.WithField("request", request).WithError(err).WithField("sql", sqlCommand).Error("Error executing command")
 			return response, err
 		}
 
-		knownShape = h.knownShapes.Remember(knownShape)
+		knownShape = h.knownShapes.ApplyDelta(shapeDelta)
 	}
 
 	upsertCommand, upsertParameters, err := createUpsertSQL(request.DataPoint, knownShape)
@@ -165,6 +164,14 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 	}
 
 	_, err = h.db.Exec(upsertCommand, upsertParameters...)
+
+	if err != nil {
+		logrus.WithField("request", request).WithError(err).WithField("sql", upsertCommand).WithField("parameters", upsertParameters).Error("Error executing upsert")
+
+		return protocol.ReceiveShapeResponse{
+			Success: false,
+		}, nil
+	}
 
 	return protocol.ReceiveShapeResponse{
 		Success: true,
@@ -213,11 +220,7 @@ func (h *mariaSubscriber) connect(settingsMap map[string]interface{}) error {
 		return err
 	}
 
-	h.knownShapes = shapeutils.NewShapeCache()
-
-	for _, shape := range shapes {
-		h.knownShapes.Remember(shape)
-	}
+	h.knownShapes = shapeutils.NewShapeCacheWithShapes(shapes)
 
 	return nil
 }
@@ -265,13 +268,13 @@ func (s *mariaSubscriber) receiveShapeToTable(ctx subscriber.Context, shape pipe
 	return nil
 }
 
-func (h *mariaSubscriber) getKnownShapes() ([]*shapeutils.KnownShape, error) {
+func (h *mariaSubscriber) getKnownShapes() (map[string]*shapeutils.KnownShape, error) {
 
 	var (
 		err        error
 		rows       *sql.Rows
 		tableNames []string
-		shapes     []*shapeutils.KnownShape
+		shapes     = map[string]*shapeutils.KnownShape{}
 	)
 
 	rows, err = h.db.Query("SHOW TABLES")
@@ -319,7 +322,7 @@ func (h *mariaSubscriber) getKnownShapes() ([]*shapeutils.KnownShape, error) {
 
 		shape := shapeutils.NewKnownShape(dp)
 
-		shapes = append(shapes, shape)
+		shapes[shape.Name] = shape
 	}
 
 	return shapes, nil

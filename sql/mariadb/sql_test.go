@@ -31,11 +31,11 @@ func TestCreateShapeChangeSQL(t *testing.T) {
 		shape := shapeutils.ShapeDelta{
 			IsNew:   true,
 			Name:    "test",
-			NewKeys: []string{"id"},
+			NewKeys: []string{"id", "sku"},
 			NewProperties: map[string]string{
 				"id":   "integer",
-				"str":  "string",
 				"date": "date",
+				"sku":  "string",
 			},
 		}
 
@@ -49,8 +49,8 @@ func TestCreateShapeChangeSQL(t *testing.T) {
 			So(actual, ShouldEqual, e(`CREATE TABLE IF NOT EXISTS "test" (
 	"date" DATETIME NULL,
 	"id" INT(10) NOT NULL,
-	"str" VARCHAR(1000) NULL,
-	PRIMARY KEY ("id")
+	"sku" VARCHAR(1000) NOT NULL,
+	PRIMARY KEY ("id", "sku")
 )`))
 
 		})
@@ -66,9 +66,9 @@ func TestCreateShapeChangeSQL(t *testing.T) {
 				So(actual, ShouldEqual, e(`ALTER TABLE "test"
 	ADD COLUMN IF NOT EXISTS "date" DATETIME NULL
 	,ADD COLUMN IF NOT EXISTS "id" INT(10) NOT NULL
-	,ADD COLUMN IF NOT EXISTS "str" VARCHAR(1000) NULL
+	,ADD COLUMN IF NOT EXISTS "sku" VARCHAR(1000) NOT NULL
 	,DROP PRIMARY KEY
-	,ADD PRIMARY KEY ("id");`))
+	,ADD PRIMARY KEY ("id", "sku");`))
 
 			})
 
@@ -79,7 +79,7 @@ func TestCreateShapeChangeSQL(t *testing.T) {
 				So(actual, ShouldEqual, e(`ALTER TABLE "test"
 	ADD COLUMN IF NOT EXISTS "date" DATETIME NULL
 	,ADD COLUMN IF NOT EXISTS "id" INT(10) NOT NULL
-	,ADD COLUMN IF NOT EXISTS "str" VARCHAR(1000) NULL;`))
+	,ADD COLUMN IF NOT EXISTS "sku" VARCHAR(1000) NOT NULL;`))
 
 			})
 
