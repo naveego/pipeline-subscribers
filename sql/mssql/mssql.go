@@ -1,4 +1,4 @@
-package mssql
+package main
 
 import (
 	"database/sql"
@@ -7,27 +7,26 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
-	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
+	"github.com/naveego/navigator-go/subscribers/protocol"
 )
 
-var batchSize = 1000
+var batchSize = 250
 
-type Subscriber struct {
+type mssqlSubscriber struct {
 	db             *sql.DB // The connection to the database
 	tx             *sql.Tx // The current transaction
 	count          int
+	cmdType        string
+	mappings       []pipeline.ShapeMapping
+	shapes         pipeline.ShapeDefinitions
 	ensuredSchemas []string // An array of schema names that have already been ensured by this subscriber
 }
 
-func NewSubscriber() subscriber.Subscriber {
-	return &Subscriber{}
-}
-
-
-func (h *Subscriber) Init(request protocol.InitRequest) (protocol.InitResponse, error) {
+func (s *mssqlSubscriber) Init(request protocol.InitRequest) (protocol.InitResponse, error) {
 	var resp protocol.InitResponse
 
 	// Init may be called multiple times, so we need to close an Open
@@ -46,6 +45,16 @@ func (h *Subscriber) Init(request protocol.InitRequest) (protocol.InitResponse, 
 		return resp, fmt.Errorf("could not connect to server: %v", err)
 	}
 
+	sReq := protocol.DiscoverShapesRequest{
+		Settings: request.Settings,
+	}
+	sResp, err := s.DiscoverShapes(sReq)
+	if err != nil {
+		return resp, fmt.Errorf("could not get shapes: %v", err)
+	}
+
+	s.shapes = sResp.Shapes
+
 	tx, err := db.Begin()
 	if err != nil {
 		return resp, fmt.Errorf("could not start initial transaction: %v", err)
@@ -53,11 +62,11 @@ func (h *Subscriber) Init(request protocol.InitRequest) (protocol.InitResponse, 
 
 	s.tx = tx
 	s.db = db
+	s.mappings = request.Mappings
 	return resp, nil
 }
 
-
-func (h *mariaSubscriber) TestConnection(request protocol.TestConnectionRequest) (protocol.TestConnectionResponse, error) {
+func (s *mssqlSubscriber) TestConnection(request protocol.TestConnectionRequest) (protocol.TestConnectionResponse, error) {
 	resp := protocol.TestConnectionResponse{}
 
 	connString, err := buildConnectionString(request.Settings, 10)
@@ -84,59 +93,84 @@ func (h *mariaSubscriber) TestConnection(request protocol.TestConnectionRequest)
 	return resp, nil
 }
 
-
-func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest) (protocol.DiscoverShapesResponse, error) {
+func (s *mssqlSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest) (protocol.DiscoverShapesResponse, error) {
 	resp := protocol.DiscoverShapesResponse{}
 
 	mr := utils.NewMapReader(request.Settings)
 	cmdType, _ := mr.ReadString("command_type")
+
+	var shapes pipeline.ShapeDefinitions
+	var err error
+
 	if cmdType == "stored procedure" {
-		shapes := getSPShapes(request.Settings)
+		shapes, err = getSPShapes(request.Settings)
+	} else {
+		shapes, err = getTableShapes(request.Settings)
 	}
 
-	return getTableShapes(request.Settings)
+	resp.Shapes = shapes
+	return resp, err
 }
 
-func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest) (protocol.ReceiveShapeResponse, error) {
+
+	resp := protocol.ReceiveShapeResponse{}
 
 	if s.count >= batchSize {
 		err := s.tx.Commit()
 		if err != nil {
-			return err
+			return resp, err
 		}
 
 		s.tx, err = s.db.Begin()
 		if err != nil {
-			return err
+			return resp, err
 		}
 
 		s.count = 0
 	}
 
 	s.count++
-	mr := utils.NewMapReader(ctx.Subscriber.Settings)
-	cmdType, _ := mr.ReadString("command_type")
-	if cmdType == "stored procedure" {
-		return s.receiveShapeToSP(ctx, shape, dataPoint)
+
+	var shape pipeline.ShapeDefinition
+	for _, x := range s.shapes {
+		if x.Name == request.ShapeName {
+			shape = x
+		}
 	}
 
-	return s.receiveShapeToTable(ctx, shape, dataPoint)
+	if shape.Name == "" {
+		resp.Message = fmt.Sprintf("Could not find shape with name: %s", request.ShapeName)
+		logrus.Error(resp.Message)
+		return resp, nil
+	}
+
+	var err error
+	if s.cmdType == "stored procedure" {
+		err = s.receiveShapeToSP(shape, request.DataPoint)
+	} else {
+		err = s.receiveShapeToTable(shape, request.DataPoint)
+	}
+
+	resp.Success = true
+	resp.Message = "Received"
+	return resp, err
 }
 
-func (s *Subscriber) Dispose(ctx subscriber.Context) error {
+func (s *mssqlSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
 	if s.db != nil {
 		s.tx.Commit()
 		err := s.db.Close()
 		s.db = nil
 		if err != nil {
-			return err
+			return protocol.DisposeResponse{}, err
 		}
 	}
 
-	return nil
+	return protocol.DisposeResponse{}, nil
 }
 
-func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+func (s *mssqlSubscriber) receiveShapeToTable(shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
 	schemaName := "dbo"
 	tableName := shape.Name
 
@@ -146,7 +180,7 @@ func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.
 		tableName = tableName[idx+2:]
 	}
 
-	valCount := len(ctx.Pipeline.Mappings)
+	valCount := len(s.mappings)
 	vals := make([]interface{}, valCount)
 	for i := 0; i < valCount; i++ {
 		vals[i] = new(interface{})
@@ -155,7 +189,7 @@ func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.
 	colNames := []string{}
 	params := []string{}
 	index := 1
-	for _, m := range ctx.Pipeline.Mappings {
+	for _, m := range s.mappings {
 		p := fmt.Sprintf("?%d", index)
 		params = append(params, p)
 		colNames = append(colNames, m.To)
@@ -179,7 +213,7 @@ func (s *Subscriber) receiveShapeToTable(ctx subscriber.Context, shape pipeline.
 	return nil
 }
 
-func (s *Subscriber) receiveShapeToSP(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+func (s *mssqlSubscriber) receiveShapeToSP(shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
 	schemaName := "dbo"
 	spName := shape.Name
 
@@ -189,7 +223,7 @@ func (s *Subscriber) receiveShapeToSP(ctx subscriber.Context, shape pipeline.Sha
 		spName = spName[idx+2:]
 	}
 
-	valCount := len(ctx.Pipeline.Mappings)
+	valCount := len(s.mappings)
 	vals := make([]interface{}, valCount)
 	for i := 0; i < valCount; i++ {
 		vals[i] = new(interface{})
@@ -197,7 +231,7 @@ func (s *Subscriber) receiveShapeToSP(ctx subscriber.Context, shape pipeline.Sha
 
 	params := []string{}
 	index := 1
-	for _, m := range ctx.Pipeline.Mappings {
+	for _, m := range s.mappings {
 		p := fmt.Sprintf(" %s = ?%d", m.To, index)
 		params = append(params, p)
 

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/naveego/pipeline-subscribers/shapeutils"
-
 	"github.com/Sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/navigator-go/subscribers/server"
@@ -29,13 +27,11 @@ func main() {
 
 	addr := os.Args[1]
 
-	if *verbose {
-		logrus.SetLevel(logrus.DebugLevel)
-	}
+	//if *verbose {
+	logrus.SetLevel(logrus.DebugLevel)
+	//}
 
-	subscriber := &mssqlSubscriber{
-		knownShapes: shapeutils.NewShapeCache(),
-	}
+	subscriber := &mssqlSubscriber{}
 
 	srv := server.NewSubscriberServer(addr, subscriber)
 
