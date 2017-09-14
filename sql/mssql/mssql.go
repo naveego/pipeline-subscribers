@@ -26,7 +26,9 @@ func NewSubscriber() subscriber.Subscriber {
 	return &Subscriber{}
 }
 
-func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{}) error {
+
+func (h *Subscriber) Init(request protocol.InitRequest) (protocol.InitResponse, error) {
+	var resp protocol.InitResponse
 
 	// Init may be called multiple times, so we need to close an Open
 	// connection from a previous call
@@ -35,53 +37,64 @@ func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{
 		s.db = nil
 	}
 
-	connString, err := buildConnectionString(settings, 10)
+	connString, err := buildConnectionString(request.Settings, 10)
 	if err != nil {
-		return fmt.Errorf("could not connect to server: %v", err)
+		return resp, fmt.Errorf("could not connect to server: %v", err)
 	}
 	db, err := sql.Open("mssql", connString)
 	if err != nil {
-		return fmt.Errorf("could not connect to server: %v", err)
+		return resp, fmt.Errorf("could not connect to server: %v", err)
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("could not start initial transaction: %v", err)
+		return resp, fmt.Errorf("could not start initial transaction: %v", err)
 	}
 
 	s.tx = tx
 	s.db = db
-	return nil
+	return resp, nil
 }
 
-func (s *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[string]interface{}) (bool, string, error) {
-	connString, err := buildConnectionString(connSettings, 10)
+
+func (h *mariaSubscriber) TestConnection(request protocol.TestConnectionRequest) (protocol.TestConnectionResponse, error) {
+	resp := protocol.TestConnectionResponse{}
+
+	connString, err := buildConnectionString(request.Settings, 10)
 	if err != nil {
-		return false, "could not connect to server", err
+		resp.Message = err.Error()
+		return resp, err
 	}
 	conn, err := sql.Open("mssql", connString)
 	if err != nil {
-		return false, "could not connect to server", err
+		resp.Message = err.Error()
+		return resp, err
 	}
 	defer conn.Close()
 
 	stmt, err := conn.Prepare("select 1")
 	if err != nil {
-		return false, "could not connect to server", err
+		resp.Message = err.Error()
+		return resp, err
 	}
 	defer stmt.Close()
 
-	return true, "successfully connected to server", nil
+	resp.Success = true
+	resp.Message = "Connected Successfully"
+	return resp, nil
 }
 
-func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
-	mr := utils.NewMapReader(ctx.Subscriber.Settings)
+
+func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest) (protocol.DiscoverShapesResponse, error) {
+	resp := protocol.DiscoverShapesResponse{}
+
+	mr := utils.NewMapReader(request.Settings)
 	cmdType, _ := mr.ReadString("command_type")
 	if cmdType == "stored procedure" {
-		return getSPShapes(ctx.Subscriber.Settings)
+		shapes := getSPShapes(request.Settings)
 	}
 
-	return getTableShapes(ctx.Subscriber.Settings)
+	return getTableShapes(request.Settings)
 }
 
 func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
