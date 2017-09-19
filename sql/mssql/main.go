@@ -25,11 +25,11 @@ func main() {
 
 	flag.Parse()
 
-	addr := os.Args[1]
+	addr := os.Args[len(os.Args)-1]
 
-	//if *verbose {
-	logrus.SetLevel(logrus.DebugLevel)
-	//}
+	if *verbose {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
 
 	subscriber := &mssqlSubscriber{}
 

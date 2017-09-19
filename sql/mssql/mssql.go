@@ -14,8 +14,6 @@ import (
 	"github.com/naveego/navigator-go/subscribers/protocol"
 )
 
-var batchSize = 250
-
 type mssqlSubscriber struct {
 	db             *sql.DB // The connection to the database
 	tx             *sql.Tx // The current transaction
@@ -53,14 +51,11 @@ func (s *mssqlSubscriber) Init(request protocol.InitRequest) (protocol.InitRespo
 		return resp, fmt.Errorf("could not get shapes: %v", err)
 	}
 
+	mr := utils.NewMapReader(request.Settings)
+	cmdType, _ := mr.ReadString("command_type")
+
 	s.shapes = sResp.Shapes
-
-	tx, err := db.Begin()
-	if err != nil {
-		return resp, fmt.Errorf("could not start initial transaction: %v", err)
-	}
-
-	s.tx = tx
+	s.cmdType = cmdType
 	s.db = db
 	s.mappings = request.Mappings
 	return resp, nil
@@ -116,22 +111,6 @@ func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 
 	resp := protocol.ReceiveShapeResponse{}
 
-	if s.count >= batchSize {
-		err := s.tx.Commit()
-		if err != nil {
-			return resp, err
-		}
-
-		s.tx, err = s.db.Begin()
-		if err != nil {
-			return resp, err
-		}
-
-		s.count = 0
-	}
-
-	s.count++
-
 	var shape pipeline.ShapeDefinition
 	for _, x := range s.shapes {
 		if x.Name == request.ShapeName {
@@ -145,6 +124,8 @@ func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 		return resp, nil
 	}
 
+	logrus.Debugf("Data Point: %v", request.DataPoint)
+
 	var err error
 	if s.cmdType == "stored procedure" {
 		err = s.receiveShapeToSP(shape, request.DataPoint)
@@ -152,14 +133,20 @@ func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 		err = s.receiveShapeToTable(shape, request.DataPoint)
 	}
 
-	resp.Success = true
-	resp.Message = "Received"
+	if err != nil {
+		logrus.Error("Error receiving shape: ", err)
+		resp.Success = false
+		resp.Message = err.Error()
+	} else {
+		resp.Success = true
+		resp.Message = "Received"
+	}
+
 	return resp, err
 }
 
 func (s *mssqlSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
 	if s.db != nil {
-		s.tx.Commit()
 		err := s.db.Close()
 		s.db = nil
 		if err != nil {
@@ -205,8 +192,10 @@ func (s *mssqlSubscriber) receiveShapeToTable(shape pipeline.ShapeDefinition, da
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES (%s)", schemaName, tableName, colNameStr, paramsStr)
 
-	_, e := s.tx.Exec(cmd, vals...)
+	logrus.Debugf("QUERY: %s", cmd)
+	_, e := s.db.Exec(cmd, vals...)
 	if e != nil {
+		logrus.Error("Error executing query: ", e)
 		return e
 	}
 
@@ -244,7 +233,7 @@ func (s *mssqlSubscriber) receiveShapeToSP(shape pipeline.ShapeDefinition, dataP
 
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("EXEC [%s].[%s] %s", schemaName, spName, paramsStr)
-	_, e := s.tx.Exec(cmd, vals...)
+	_, e := s.db.Exec(cmd, vals...)
 	if e != nil {
 		return e
 	}
