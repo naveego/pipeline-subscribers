@@ -1,4 +1,4 @@
-package csv
+package main
 
 import (
 	"encoding/json"
@@ -9,34 +9,33 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
+	"github.com/naveego/navigator-go/subscribers/protocol"
 )
 
-type Subscriber struct {
+type csvSubscriber struct {
 	out             *os.File
 	shape           pipeline.ShapeDefinition
 	columnSeparator string
 	quoteCharacter  string
 	headersWritten  bool
+	mappings        []pipeline.ShapeMapping
 }
 
-func NewSubscriber() subscriber.Subscriber {
-	return &Subscriber{}
-}
+func (s *csvSubscriber) Init(request protocol.InitRequest) (protocol.InitResponse, error) {
+	resp := protocol.InitResponse{}
 
-func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{}) error {
-	mr := utils.NewMapReader(settings)
+	mr := utils.NewMapReader(request.Settings)
 
 	shapeFile, ok := mr.ReadString("shape_file")
 	if !ok {
-		return fmt.Errorf("Please provide a shape file")
+		return resp, fmt.Errorf("Please provide a shape file")
 	}
 
 	outPath, ok := mr.ReadString("out")
 	if !ok {
-		return fmt.Errorf("Please provide an out put path")
+		return resp, fmt.Errorf("Please provide an out put path")
 	}
 
 	appendDateToFile, _ := mr.ReadBool("append_date_to_name")
@@ -55,20 +54,18 @@ func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{
 
 	out, err := os.Create(outPath)
 	if err != nil {
-		return fmt.Errorf("Could not create output file: %v", err)
+		return resp, fmt.Errorf("Could not create output file: %v", err)
 	}
 
 	var shape pipeline.ShapeDefinition
 	shapeBytes, err := ioutil.ReadFile(shapeFile)
 	if err != nil {
-		ctx.Logger.Error("Could not read shape file: ", err)
-		return fmt.Errorf("Could not read shape file: %v", err)
+		return resp, fmt.Errorf("Could not read shape file: %v", err)
 	}
 
 	err = json.Unmarshal(shapeBytes, &shape)
 	if err != nil {
-		ctx.Logger.Error("Could not read shape file: ", err)
-		return fmt.Errorf("Could not read shape file: %v", err)
+		return resp, fmt.Errorf("Could not read shape file: %v", err)
 	}
 
 	quoteCharacter, _ := mr.ReadString("quote_character")
@@ -79,41 +76,43 @@ func (s *Subscriber) Init(ctx subscriber.Context, settings map[string]interface{
 	s.quoteCharacter = quoteCharacter
 	s.shape = shape
 	s.out = out
+	s.mappings = request.Mappings
 
-	return nil
+	return resp, nil
 }
 
-func (s *Subscriber) TestConnection(ctx subscriber.Context, connSettings map[string]interface{}) (bool, string, error) {
-	return true, "", nil
+func (s *csvSubscriber) TestConnection(request protocol.TestConnectionRequest) (protocol.TestConnectionResponse, error) {
+	return protocol.TestConnectionResponse{Success: true}, nil
 }
 
-func (s *Subscriber) Shapes(ctx subscriber.Context) (pipeline.ShapeDefinitions, error) {
+func (s *csvSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest) (protocol.DiscoverShapesResponse, error) {
+	resp := protocol.DiscoverShapesResponse{}
 	var shape pipeline.ShapeDefinition
-	mr := utils.NewMapReader(ctx.Subscriber.Settings)
+
+	mr := utils.NewMapReader(request.Settings)
 	shapeFile, ok := mr.ReadString("shape_file")
 	if !ok {
-		return pipeline.ShapeDefinitions{}, fmt.Errorf("Please provide a shape file")
+		return resp, fmt.Errorf("Please provide a shape file")
 	}
 	shapeBytes, err := ioutil.ReadFile(shapeFile)
 	if err != nil {
-		ctx.Logger.Error("Could not read shape file: ", err)
-		return pipeline.ShapeDefinitions{}, fmt.Errorf("Could not read shape file: %v", err)
+		return resp, fmt.Errorf("Could not read shape file: %v", err)
 	}
 
 	err = json.Unmarshal(shapeBytes, &shape)
 	if err != nil {
-		ctx.Logger.Error("Could not read shape file: ", err)
-		return pipeline.ShapeDefinitions{}, fmt.Errorf("Could not read shape file: %v", err)
+		return resp, fmt.Errorf("Could not read shape file: %v", err)
 	}
 	s.shape = shape
-	return pipeline.ShapeDefinitions{s.shape}, nil
+	resp.Shapes = pipeline.ShapeDefinitions{s.shape}
+	return resp, nil
 }
 
-func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinition, dataPoint pipeline.DataPoint) error {
+func (s *csvSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest) (protocol.ReceiveShapeResponse, error) {
 
 	if !s.headersWritten {
 		headerStr := ""
-		for _, m := range ctx.Pipeline.Mappings {
+		for _, m := range s.mappings {
 			headerStr = headerStr + m.To + s.columnSeparator
 		}
 
@@ -123,9 +122,9 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinit
 	}
 
 	valStr := ""
-	for _, m := range ctx.Pipeline.Mappings {
+	for _, m := range s.mappings {
 
-		v, ok := dataPoint.Data[m.From]
+		v, ok := request.DataPoint.Data[m.From]
 		if ok && v != nil {
 			valStr = valStr + fmt.Sprintf("%v", v) + s.columnSeparator
 		} else {
@@ -137,17 +136,18 @@ func (s *Subscriber) Receive(ctx subscriber.Context, shape pipeline.ShapeDefinit
 
 	fmt.Fprintf(s.out, valStr+"\r\n")
 
-	return nil
+	return protocol.ReceiveShapeResponse{Success: true}, nil
 }
 
-func (s *Subscriber) Dispose(ctx subscriber.Context) error {
+func (s *csvSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
+
 	if s.out != nil {
 		err := s.out.Close()
 		s.out = nil
 		if err != nil {
-			return err
+			return protocol.DisposeResponse{}, err
 		}
 	}
 
-	return nil
+	return protocol.DisposeResponse{}, nil
 }
