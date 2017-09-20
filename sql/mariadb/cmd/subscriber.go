@@ -113,7 +113,7 @@ func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest)
 		err      error
 	)
 
-	err = h.connect(request.SubscriberInstance.Settings)
+	err = h.connect(request.Settings)
 
 	if err != nil {
 		return response, err
