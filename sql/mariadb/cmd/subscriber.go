@@ -126,6 +126,8 @@ func (h *mariaSubscriber) DiscoverShapes(request protocol.DiscoverShapesRequest)
 
 func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest) (protocol.ReceiveShapeResponse, error) {
 
+	logrus.WithField("request", request).Debug("RecieveDataPoint")
+
 	var (
 		response   = protocol.ReceiveShapeResponse{}
 		knownShape *shapeutils.KnownShape
@@ -148,6 +150,8 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 			return response, err
 		}
 
+		logrus.WithField("sql", sqlCommand).Debug("Updating table")
+
 		_, err = h.db.Exec(sqlCommand)
 
 		if err != nil {
@@ -162,6 +166,8 @@ func (h *mariaSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 	if err != nil {
 		return response, err
 	}
+
+	logrus.WithFields(logrus.Fields{"sql": upsertCommand, "params": upsertParameters}).Debug("Upserting record")
 
 	_, err = h.db.Exec(upsertCommand, upsertParameters...)
 

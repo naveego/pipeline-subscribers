@@ -6,10 +6,13 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/pipeline-subscribers/shapeutils"
 )
+
+const MySQLTimeFormat = "2006-01-02 15:04:05"
 
 const createTemplateText = `CREATE TABLE IF NOT EXISTS {{tick .Name}} ({{range .Columns}}
 	{{tick .Name}} {{.SqlType}} {{if .IsKey}}NOT {{end}}NULL,{{end}}{{if gt (len .Keys) 0}}
@@ -191,9 +194,10 @@ func createUpsertSQL(datapoint pipeline.DataPoint, knownShape *shapeutils.KnownS
 	orderer = func(dp pipeline.DataPoint) (p []interface{}) {
 		// Populate the parameter list with values from the datapoint,
 		// in the column order.
-		for _, c := range knownShape.Properties {
+		for _, c := range model.Columns {
 			value := dp.Data[c.Name]
-			p = append(p, value)
+			formattedValue := formatValue(c.SqlType, value)
+			p = append(p, formattedValue)
 		}
 
 		return p
@@ -205,6 +209,19 @@ func createUpsertSQL(datapoint pipeline.DataPoint, knownShape *shapeutils.KnownS
 	params = orderer(datapoint)
 
 	return
+}
+
+func formatValue(t string, value interface{}) interface{} {
+	switch t {
+	case "DATETIME":
+		if dateString, ok := value.(string); ok {
+			if date, err := time.Parse(time.RFC3339, dateString); err == nil {
+				return date.UTC().Format(MySQLTimeFormat)
+			}
+		}
+	}
+
+	return value
 }
 
 func convertToSQLType(t string) string {
