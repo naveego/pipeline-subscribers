@@ -98,13 +98,13 @@ func TestCreateUpsertSQL(t *testing.T) {
 
 			Shape: pipeline.Shape{
 				KeyNames:   []string{"ID"},
-				Properties: []string{"DateAvailable:date", "ID:integer", "Name:string", "Price:float"},
+				Properties: []string{"NextDateAvailable:date", "ID:integer", "Name:string", "Price:float"},
 			},
 			Data: map[string]interface{}{
-				"ID":            1,
-				"Name":          "First",
-				"Price":         42.2,
-				"DateAvailable": "2017-10-11",
+				"Name":              "First",
+				"Price":             42.2,
+				"ID":                1,
+				"NextDateAvailable": "2017-10-11",
 			},
 		}
 
@@ -116,14 +116,14 @@ func TestCreateUpsertSQL(t *testing.T) {
 			Convey("Then there should be no error", nil)
 			So(err, ShouldBeNil)
 			Convey("Then the SQL should be correct", nil)
-			So(actual, ShouldEqual, e(`INSERT INTO "Test.Products" ("DateAvailable", "ID", "Name", "Price")
+			So(actual, ShouldEqual, e(`INSERT INTO "Test.Products" ("ID", "Name", "NextDateAvailable", "Price")
 	VALUES (?, ?, ?, ?)
 	ON DUPLICATE KEY UPDATE
-		"DateAvailable" = VALUES("DateAvailable")
-		,"Name" = VALUES("Name")
+		"Name" = VALUES("Name")
+		,"NextDateAvailable" = VALUES("NextDateAvailable")
 		,"Price" = VALUES("Price");`))
 			Convey("Then the parameters should be in the correct order", nil)
-			So(params, ShouldResemble, []interface{}{"2017-10-11", 1, "First", 42.2})
+			So(params, ShouldResemble, []interface{}{1, "First", "2017-10-11", 42.2})
 
 			// Convey("Then the cache should be populated", func() {
 			// 	_, ok := shape.Get(keyUpsertSQL)

@@ -18,6 +18,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/naveego/navigator-go/subscribers/server"
@@ -29,20 +31,15 @@ var verbose *bool
 
 // RootCmd represents the base command when called without any subcommands
 var RootCmd = &cobra.Command{
-	Use:   "mariadb [listen address] [broadcast address*]",
-	Args:  cobra.RangeArgs(1, 2),
+	Use:   "mariadb [listen address]",
+	Args:  cobra.ExactArgs(1),
 	Short: "A subscriber that sends all data to MariaDB",
 	Long: `Settings should contain a DataSourceName property with a value 
 corresponding to the standard MariaDB/MySQL connection string: "user:password@address:port/database".`,
 
-	RunE: func(cmd *cobra.Command, args []string) error {
+	Run: func(cmd *cobra.Command, args []string) {
 
 		logrus.SetOutput(os.Stdout)
-
-		if len(os.Args) < 2 {
-			fmt.Println("Not enough arguments.")
-			os.Exit(-1)
-		}
 
 		addr := args[0]
 
@@ -56,9 +53,14 @@ corresponding to the standard MariaDB/MySQL connection string: "user:password@ad
 
 		srv := server.NewSubscriberServer(addr, subscriber)
 
-		err := srv.ListenAndServe()
+		go func() {
+			err := srv.ListenAndServe()
+			if err != nil {
+				panic(err)
+			}
+		}()
 
-		return err
+		<-awaitShutdown()
 	},
 }
 
@@ -74,4 +76,27 @@ func Execute() {
 func init() {
 
 	verbose = flag.Bool("v", false, "enable verbose logging")
+}
+
+func awaitShutdown() <-chan bool {
+	sigs := make(chan os.Signal, 1)
+	done := make(chan bool, 1)
+
+	// `signal.Notify` registers the given channel to
+	// receive notifications of the specified signals.
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	// This goroutine executes a blocking receive for
+	// signals. When it gets one it'll print it out
+	// and then notify the program that it can finish.
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		done <- true
+	}()
+
+	fmt.Println("CTRL-C to quit")
+
+	return done
 }

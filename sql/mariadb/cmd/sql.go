@@ -23,7 +23,7 @@ const alterTemplateText = `ALTER TABLE {{tick .Name}}{{range $i, $e := .Columns}
 
 const upsertTemplateText = `INSERT INTO {{tick .Name}} ({{range $i, $e := .Columns}}{{if $i}}, {{end}}{{tick $e.Name}}{{end}})
 	VALUES ({{range $i, $e := .Columns}}{{if $i}}, {{end}}?{{end}})
-	ON DUPLICATE KEY UPDATE{{range $i, $e := .Columns}}{{if not $e.IsKey}}
+	ON DUPLICATE KEY UPDATE{{range $i, $e := .NonKeyColumns}}{{if not $e.IsKey}}
 		{{if $i}},{{end}}{{tick $e.Name}} = VALUES({{tick $e.Name}}){{end}}{{end}};`
 
 var (
@@ -87,6 +87,11 @@ func createShapeChangeSQL(shapeInfo shapeutils.ShapeDelta) (string, error) {
 	}
 
 	sort.Sort(model.Columns)
+	for _, c := range model.Columns {
+		if !c.IsKey {
+			model.NonKeyColumns = append(model.NonKeyColumns, c)
+		}
+	}
 
 	if shapeInfo.IsNew {
 		err = createTemplate.Execute(w, model)
@@ -103,9 +108,10 @@ func createShapeChangeSQL(shapeInfo shapeutils.ShapeDelta) (string, error) {
 }
 
 type sqlTableModel struct {
-	Name    string
-	Columns sqlColumns
-	Keys    []string
+	Name          string
+	Columns       sqlColumns
+	NonKeyColumns sqlColumns
+	Keys          []string
 }
 
 type sqlColumns []sqlColumnModel
@@ -161,6 +167,11 @@ func createUpsertSQL(datapoint pipeline.DataPoint, knownShape *shapeutils.KnownS
 
 	// Make sure we have the columns in a known order, for consistency
 	sort.Sort(model.Columns)
+	for _, c := range model.Columns {
+		if !c.IsKey {
+			model.NonKeyColumns = append(model.NonKeyColumns, c)
+		}
+	}
 
 	// Render the SQL
 	w := &bytes.Buffer{}
