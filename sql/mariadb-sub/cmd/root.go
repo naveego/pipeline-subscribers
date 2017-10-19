@@ -21,7 +21,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"github.com/naveego/navigator-go/subscribers/server"
 	"github.com/naveego/pipeline-subscribers/shapeutils"
 	"github.com/spf13/cobra"
@@ -35,7 +35,9 @@ var RootCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Short: "A subscriber that sends all data to MariaDB",
 	Long: `Settings should contain a DataSourceName property with a value 
-corresponding to the standard MariaDB/MySQL connection string: "user:password@address:port/database".`,
+corresponding to the standard MariaDB/MySQL connection string: "user:password@address:port/database".
+
+User must have CREATE and ALTER permissions.`,
 
 	Run: func(cmd *cobra.Command, args []string) {
 

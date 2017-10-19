@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"github.com/naveego/api/pipeline/subscriber"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
