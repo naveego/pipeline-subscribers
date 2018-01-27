@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
@@ -195,7 +195,7 @@ func (s *mssqlSubscriber) receiveShapeToTable(shape pipeline.ShapeDefinition, da
 	logrus.Debugf("QUERY: %s", cmd)
 	_, e := s.db.Exec(cmd, vals...)
 	if e != nil {
-		logrus.Error("Error executing query: ", e)
+		logrus.Errorf("Error executing query: %s %s", cmd, e)
 		return e
 	}
 

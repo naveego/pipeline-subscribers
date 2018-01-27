@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/navigator-go/subscribers/server"
 )
