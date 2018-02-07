@@ -188,7 +188,7 @@ func (s *mssqlSubscriber) receiveShapeToTable(shape pipeline.ShapeDefinition, da
 		index++
 	}
 
-	colNameStr := strings.Join(colNames, ",")
+	colNameStr := "[" + strings.Join(colNames, "],[") + "]"
 	paramsStr := strings.Join(params, ",")
 	cmd := fmt.Sprintf("INSERT INTO [%s].[%s] (%s) VALUES (%s)", schemaName, tableName, colNameStr, paramsStr)
 
