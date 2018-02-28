@@ -117,12 +117,5 @@ func containsProp(v pipeline.PropertyDefinition, a []pipeline.PropertyDefinition
 }
 
 func canonicalName(dp pipeline.DataPoint) string {
-	if dp.Source == "" {
-		return dp.Entity
-	}
-	if dp.Entity == "" {
-		return dp.Source
-	}
-
-	return dp.Source + "." + dp.Entity
+	return dp.Entity
 }

@@ -31,6 +31,12 @@ func NewShapeCacheWithShapes(initialShapes map[string]*KnownShape) ShapeCache {
 func (s *ShapeCache) GetKnownShape(datapoint pipeline.DataPoint) (shape *KnownShape, GetKnownShaped bool) {
 
 	name := canonicalName(datapoint)
+
+	if datapoint.Action == pipeline.DataPointStartPublish {
+		// On a new publish we want to start from scratch.
+		delete(s.shapes, name)
+	}
+
 	shape, ok := s.shapes[name]
 
 	if !ok || !shape.MatchesShape(datapoint.Shape) {
