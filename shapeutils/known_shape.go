@@ -20,10 +20,11 @@ type KnownShape struct {
 
 	cache map[string]interface{}
 
-	keyHashes          knownHashes     // contains all the key hashes this shape contains.
-	propHashes         knownHashes     // contains all the property hashes this shape contains.
-	allKeys            map[string]bool // contains all the key strings this shape contains, used to recognize subsets of keys quickly.
-	allPropertyStrings map[string]bool // contains all the name:type property strings this shape has observed, used to recognize subsets of properties quickly.
+	keyHashes          knownHashes       // contains all the key hashes this shape contains.
+	propHashes         knownHashes       // contains all the property hashes this shape contains.
+	allKeys            map[string]bool   // contains all the key strings this shape contains, used to recognize subsets of keys quickly.
+	allPropertyStrings map[string]bool   // contains all the name:type property strings this shape has observed, used to recognize subsets of properties quickly.
+	idToNameMap        map[string]string // maps the property IDs to friendly names
 }
 
 // Set caches the value under key. The cache will be wiped if another shape is merged in.
@@ -115,6 +116,7 @@ func NewKnownShape(datapoint pipeline.DataPoint) *KnownShape {
 		cache:              make(map[string]interface{}),
 		allKeys:            make(map[string]bool),
 		allPropertyStrings: make(map[string]bool),
+		idToNameMap:        make(map[string]string),
 		keyHashes:          knownHashes{shape.KeyNamesHash: true},
 		propHashes:         knownHashes{shape.PropertyHash: true},
 		ShapeDefinition: pipeline.ShapeDefinition{
@@ -134,6 +136,13 @@ func NewKnownShape(datapoint pipeline.DataPoint) *KnownShape {
 
 		ks.allPropertyStrings[v] = true
 		ks.Properties = append(ks.Properties, p)
+	}
+
+	for k, v := range datapoint.Data {
+		switch s := v.(type) {
+		case string:
+			ks.idToNameMap[k] = s
+		}
 	}
 
 	sort.Sort(pipeline.SortPropertyDefinitionsByName(ks.Properties))

@@ -12,14 +12,15 @@ type PropertiesAndTypes map[string]string
 // This information can be used by the subcriber to alter its
 // storage if necessary.
 type ShapeDelta struct {
-	IsNew            bool
-	HasKeyChanges    bool
-	HasNewProperties bool
-	PreviousShape    KnownShape
-	NewShape         KnownShape
-	Name             string
-	NewKeys          []string
-	NewProperties    PropertiesAndTypes
+	IsNew                        bool
+	HasKeyChanges                bool
+	HasNewProperties             bool
+	PreviousShape                KnownShape
+	NewShape                     KnownShape
+	Name                         string
+	NewKeys                      []string
+	NewProperties                PropertiesAndTypes
+	NewPropertyNameToVirtualName map[string]string
 }
 
 func (si ShapeDelta) HasChanges() bool {
@@ -34,8 +35,9 @@ func GenerateShapeDelta(prevShape *KnownShape, newShape KnownShape) ShapeDelta {
 
 	// create the info
 	info := ShapeDelta{
-		Name:     newShape.Name,
-		NewShape: newShape,
+		Name:                         newShape.Name,
+		NewShape:                     newShape,
+		NewPropertyNameToVirtualName: make(map[string]string),
 	}
 
 	// If this shape does not exist previously then
@@ -63,6 +65,10 @@ func GenerateShapeDelta(prevShape *KnownShape, newShape KnownShape) ShapeDelta {
 				info.NewProperties[prop.Name] = prop.Type
 			}
 		}
+	}
+
+	for id, name := range newShape.idToNameMap {
+		info.NewPropertyNameToVirtualName[id] = name
 	}
 
 	return info
