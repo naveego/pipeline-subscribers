@@ -7,17 +7,18 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirupsen/logrus"
 	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/naveego/api/types/pipeline"
 	"github.com/naveego/api/utils"
 	"github.com/naveego/navigator-go/subscribers/protocol"
+	"github.com/sirupsen/logrus"
 )
 
 type mssqlSubscriber struct {
 	db             *sql.DB // The connection to the database
 	tx             *sql.Tx // The current transaction
 	count          int
+	postCmd        string
 	cmdType        string
 	mappings       []pipeline.ShapeMapping
 	shapes         pipeline.ShapeDefinitions
@@ -53,7 +54,9 @@ func (s *mssqlSubscriber) Init(request protocol.InitRequest) (protocol.InitRespo
 
 	mr := utils.NewMapReader(request.Settings)
 	cmdType, _ := mr.ReadString("command_type")
+	postCmd, _ := mr.ReadString("post_command")
 
+	s.postCmd = postCmd
 	s.shapes = sResp.Shapes
 	s.cmdType = cmdType
 	s.db = db
@@ -138,6 +141,7 @@ func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 		resp.Success = false
 		resp.Message = err.Error()
 	} else {
+		s.count++
 		resp.Success = true
 		resp.Message = "Received"
 	}
@@ -146,6 +150,14 @@ func (s *mssqlSubscriber) ReceiveDataPoint(request protocol.ReceiveShapeRequest)
 }
 
 func (s *mssqlSubscriber) Dispose(request protocol.DisposeRequest) (protocol.DisposeResponse, error) {
+
+	if s.count > 0 && s.postCmd != "" {
+		_, err := s.db.Exec(s.postCmd)
+		if err != nil {
+			return protocol.DisposeResponse{}, fmt.Errorf("Could not execute post-command: %v", err)
+		}
+	}
+
 	if s.db != nil {
 		err := s.db.Close()
 		s.db = nil
